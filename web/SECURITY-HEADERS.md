@@ -10,13 +10,13 @@ deployment's real API origin.
 
 ## Headers to set
 
-| Header | Value | Notes |
-| --- | --- | --- |
-| `Content-Security-Policy` | see policy below | Set as a real header so it can be tuned / made report-only per environment. |
-| `X-Content-Type-Options` | `nosniff` | Only effective as a real header — a `<meta http-equiv>` version is ignored by browsers. |
-| `X-Frame-Options` | `DENY` | Clickjacking protection. `frame-ancestors` in the CSP is the modern equivalent; keep both for older browsers. |
-| `Referrer-Policy` | `strict-origin-when-cross-origin` | Also set via `<meta name="referrer">` in the app as a fallback; the header is authoritative. |
-| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` | HTTPS deployments only. Do not send over plain HTTP / LAN. |
+| Header                      | Value                                          | Notes                                                                                                         |
+| --------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `Content-Security-Policy`   | see policy below                               | Set as a real header so it can be tuned / made report-only per environment.                                   |
+| `X-Content-Type-Options`    | `nosniff`                                      | Only effective as a real header — a `<meta http-equiv>` version is ignored by browsers.                       |
+| `X-Frame-Options`           | `DENY`                                         | Clickjacking protection. `frame-ancestors` in the CSP is the modern equivalent; keep both for older browsers. |
+| `Referrer-Policy`           | `strict-origin-when-cross-origin`              | Also set via `<meta name="referrer">` in the app as a fallback; the header is authoritative.                  |
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` | HTTPS deployments only. Do not send over plain HTTP / LAN.                                                    |
 
 ## Content-Security-Policy
 

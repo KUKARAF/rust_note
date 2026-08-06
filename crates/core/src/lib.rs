@@ -4,6 +4,7 @@
 //! `mobile` (Tauri) crate, so it must stay free of server-only or
 //! mobile-only dependencies (no `axum`, no `tauri`).
 
+pub mod device_token;
 pub mod frontmatter;
 pub mod note_id;
 pub mod share_token;

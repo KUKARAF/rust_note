@@ -62,14 +62,22 @@ pub async fn effective_user_id(state: &AppState, session: &Session) -> Option<St
     current_user_id(session).await
 }
 
-/// Axum extractor requiring an authenticated session.
+/// Axum extractor requiring an authenticated request.
 ///
 /// Route handlers can take `RequireAuth` as an argument to get the current
 /// user's id, or reject the request with `401 Unauthorized` if there isn't
 /// one. This is the reusable primitive note CRUD / ACL routes build on.
 ///
-/// In dev mode ([`crate::config::Config::dev_mode`]) this always succeeds
-/// with the fixed user id `"admin"`, without inspecting the session at all.
+/// Resolution order:
+/// 1. dev mode ([`crate::config::Config::dev_mode`]) — always succeeds with
+///    the fixed user id `"admin"`, without inspecting anything else;
+/// 2. `Authorization: Bearer` device token (the mobile app's credential —
+///    see [`super::device_token`]). A present-but-invalid bearer is a hard
+///    401 with **no** session fallback: a client that sends a bearer has
+///    opted into token auth, and silently falling back to a cookie would
+///    let a revoked/expired device keep working through a stale session —
+///    revocation must be authoritative;
+/// 3. the `tower-sessions` session cookie (the web client's credential).
 pub struct RequireAuth(pub String);
 
 impl FromRequestParts<AppState> for RequireAuth {
@@ -81,6 +89,13 @@ impl FromRequestParts<AppState> for RequireAuth {
     ) -> Result<Self, Self::Rejection> {
         if state.config.dev_mode {
             return Ok(RequireAuth(crate::config::DEV_MODE_USER_ID.to_string()));
+        }
+
+        if let Some(token) = super::device_token::bearer_from_headers(&parts.headers) {
+            return match super::device_token::resolve(&state.db, &token).await? {
+                Some(user_id) => Ok(RequireAuth(user_id)),
+                None => Err(AppError::Unauthorized),
+            };
         }
 
         let session = Session::from_request_parts(parts, state)

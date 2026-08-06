@@ -21,10 +21,7 @@
 	);
 </script>
 
-<span
-	class="kv-chip {variant}"
-	style="--chip-color: var({colorVar});"
->
+<span class="kv-chip {variant}" style="--chip-color: var({colorVar});">
 	{@render children()}
 </span>
 

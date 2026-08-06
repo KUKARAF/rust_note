@@ -8,10 +8,7 @@
 	} = $props();
 </script>
 
-<span
-	class="kv-pulsing-dot"
-	style="--dot-color: {color}; --dot-size: {size}px;"
-></span>
+<span class="kv-pulsing-dot" style="--dot-color: {color}; --dot-size: {size}px;"></span>
 
 <style>
 	.kv-pulsing-dot {

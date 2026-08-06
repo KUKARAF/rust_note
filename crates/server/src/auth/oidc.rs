@@ -127,11 +127,24 @@ impl OidcClient {
 const FLOW_COOKIE_NAME: &str = "rustnote_oidc_flow";
 const FLOW_COOKIE_MAX_AGE: time::Duration = time::Duration::minutes(5);
 
+/// The redirect target for the mobile app's login flow. This is Tauri 2's
+/// fixed Android webview origin (the webview intercepts navigations to this
+/// host and serves the bundled frontend). If an iOS app is ever added it
+/// would need `tauri://localhost` instead.
+const APP_REDIRECT_ORIGIN: &str = "http://tauri.localhost";
+
 #[derive(Debug, Serialize, Deserialize)]
 struct FlowState {
     pkce_verifier: String,
     csrf_state: String,
     nonce: String,
+    /// `Some("app")` when the login was initiated by the mobile app
+    /// (`GET /auth/login?client=app`): the callback then mints a device
+    /// token and redirects into the app instead of to `base_url`.
+    /// `serde(default)` keeps any in-flight flow cookies from before this
+    /// field existed deserializable.
+    #[serde(default)]
+    client: Option<String>,
 }
 
 pub fn router() -> Router<AppState> {
@@ -142,8 +155,15 @@ pub fn router() -> Router<AppState> {
         .route("/auth/me", get(me))
 }
 
+#[derive(Debug, Deserialize)]
+struct LoginParams {
+    /// `client=app` marks a mobile-app login (see [`FlowState::client`]).
+    client: Option<String>,
+}
+
 async fn login(
     State(state): State<AppState>,
+    Query(params): Query<LoginParams>,
     jar: PrivateCookieJar,
 ) -> AppResult<impl axum::response::IntoResponse> {
     let Some(oidc) = state.oidc.as_ref() else {
@@ -171,6 +191,9 @@ async fn login(
         pkce_verifier: pkce_verifier.secret().clone(),
         csrf_state: csrf_state.secret().clone(),
         nonce: nonce.secret().clone(),
+        // Only the literal "app" is recorded; anything else is treated as a
+        // normal web login rather than trusted into the callback branch.
+        client: params.client.filter(|c| c == "app"),
     };
     let value = serde_json::to_string(&flow_state).map_err(|e| AppError::Internal(e.into()))?;
 
@@ -283,6 +306,27 @@ async fn callback(
     // unused-import warning.
     let _ = token_response.access_token();
 
+    // App logins get a device token minted and delivered via the redirect's
+    // URL *fragment*: the fragment never appears in any request line, so it
+    // cannot reach server or proxy access logs — the raw token exists only
+    // in this Location header and inside the app's webview.
+    //
+    // CSRF/abuse: the `client` flag rides inside this *encrypted, private*
+    // flow cookie alongside the PKCE verifier and CSRF state, so an attacker
+    // cannot flip a victim's in-flight web login into an app login. Linking
+    // a victim directly to /auth/login?client=app in a normal browser mints
+    // a token that ends up in a navigation to http://tauri.localhost — an
+    // unresolvable host off-device, and the fragment never leaves the
+    // victim's browser. Residual risk (a nuisance token on the victim's own
+    // account) is bounded by the per-user cap and sliding expiry.
+    if flow_state.client.as_deref() == Some("app") {
+        let raw = crate::auth::device_token::create(&state.db, &sub, "android-app").await?;
+        return Ok((
+            jar,
+            Redirect::to(&format!("{APP_REDIRECT_ORIGIN}/#token={raw}")),
+        ));
+    }
+
     // Redirect target after a successful login. `base_url` (root) is the
     // simplest sensible choice - the SPA is expected to live there and can
     // route itself to `/notes` etc. once it sees an authenticated session
@@ -290,7 +334,18 @@ async fn callback(
     Ok((jar, Redirect::to(&state.config.base_url)))
 }
 
-async fn logout(session: tower_sessions::Session) -> AppResult<impl axum::response::IntoResponse> {
+async fn logout(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    session: tower_sessions::Session,
+) -> AppResult<impl axum::response::IntoResponse> {
+    // App clients authenticate with a bearer device token; logout is the
+    // moment that token gets revoked (best-effort — revoking an unknown
+    // token is a no-op, and we still return 204 either way).
+    if let Some(token) = crate::auth::device_token::bearer_from_headers(&headers) {
+        crate::auth::device_token::revoke(&state.db, &token).await?;
+    }
+
     session::logout(&session).await?;
 
     // NOTE: this does not redirect through Authentik's end-session endpoint
@@ -316,12 +371,11 @@ struct MeResponse {
 
 async fn me(
     State(state): State<AppState>,
-    session: tower_sessions::Session,
+    // RequireAuth (rather than reading the session directly) so /auth/me
+    // transparently supports all three credentials: dev mode, the app's
+    // bearer device token, and the web session cookie.
+    session::RequireAuth(user_id): session::RequireAuth,
 ) -> AppResult<Json<MeResponse>> {
-    let user_id = session::effective_user_id(&state, &session)
-        .await
-        .ok_or(AppError::Unauthorized)?;
-
     let row: Option<(String, Option<String>, Option<String>)> =
         sqlx::query_as("SELECT id, email, display_name FROM users WHERE id = ?")
             .bind(&user_id)

@@ -137,6 +137,15 @@ impl Config {
                         "http://127.0.0.1:5173",
                         "http://localhost:1420",
                         "http://127.0.0.1:1420",
+                        // The Tauri Android app's webview origin — fixed (no
+                        // port roulette) in both dev and release builds.
+                        // Browsers cannot forge an Origin header, and anything
+                        // that *can* claim this origin is already running on
+                        // the user's own device, so allowing it by default is
+                        // safe. NOTE: setting RUSTNOTE_CORS_ORIGINS *replaces*
+                        // this whole list — deployments overriding it must
+                        // include http://tauri.localhost for the app to work.
+                        "http://tauri.localhost",
                     ]
                     .into_iter()
                     .map(String::from)

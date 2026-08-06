@@ -141,6 +141,107 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
+    /// Non-dev-mode state plus a seeded user and device token, with the
+    /// session layer applied (as `main.rs` does) so handlers taking a
+    /// `Session` extractor work in oneshot tests.
+    async fn bearer_app() -> (
+        axum::Router,
+        String, // raw device token for user "u1"
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let (mut state, notes_dir, db_dir) = dev_state().await;
+        {
+            let config = Arc::get_mut(&mut state.config).expect("config not yet shared");
+            config.dev_mode = false;
+        }
+
+        sqlx::query(
+            "INSERT INTO users (id, email, display_name, created_at) \
+             VALUES ('u1', 'u1@example.com', 'User One', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let token = crate::auth::device_token::create(&state.db, "u1", "android-app")
+            .await
+            .unwrap();
+
+        let session_layer =
+            tower_sessions::SessionManagerLayer::new(tower_sessions::MemoryStore::default());
+        let app = build(state).layer(session_layer);
+        (app, token, notes_dir, db_dir)
+    }
+
+    fn get_with_bearer(uri: &str, token: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn bearer_token_authenticates_api_and_me() {
+        let (app, token, _notes_dir, _db_dir) = bearer_app().await;
+
+        let resp = app
+            .clone()
+            .oneshot(get_with_bearer("/api/notes", &token))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(get_with_bearer("/auth/me", &token))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn invalid_bearer_is_401_without_session_fallback() {
+        let (app, _token, _notes_dir, _db_dir) = bearer_app().await;
+
+        let resp = app
+            .clone()
+            .oneshot(get_with_bearer("/api/notes", "not-a-real-token"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // And no credentials at all is equally a 401.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/notes")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn logout_with_bearer_revokes_the_token() {
+        let (app, token, _notes_dir, _db_dir) = bearer_app().await;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/logout")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The token must be dead afterwards.
+        let resp = app
+            .oneshot(get_with_bearer("/api/notes", &token))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
     #[tokio::test]
     async fn normal_sized_body_is_accepted() {
         // A small body must still be accepted (the limit doesn't reject

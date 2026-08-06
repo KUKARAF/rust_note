@@ -13,7 +13,15 @@
 //!
 //! The session rides along on the upgrade request's cookie, so the same
 //! [`session::effective_user_id`] used by the REST routes resolves the user
-//! (returning `"admin"` in dev mode). The connection is rejected before the
+//! (returning `"admin"` in dev mode). The mobile app cannot send that
+//! cookie cross-site, so it authenticates with `?token=<device token>`
+//! instead (resolved via [`crate::auth::device_token`]); a present-but-
+//! invalid token is a hard 401 with no session fallback, mirroring
+//! `RequireAuth`. The token travels in the query string because the browser
+//! WebSocket API cannot set headers — the server does no request logging
+//! (there is no `TraceLayer`), but a reverse proxy's access logs may capture
+//! it; operators should strip or disable query logging for `/ws/notes/*`.
+//! The connection is rejected before the
 //! upgrade unless the note exists and the user can read it. Write permission
 //! ([`acl::can_write`]) decides whether the socket's doc-mutating messages
 //! are applied — a read-only user still connects and sees live edits and
@@ -78,16 +86,40 @@ pub fn router() -> Router<AppState> {
         .route("/ws/shared/{token}", get(guest_ws_handler))
 }
 
+/// Query parameters for the authenticated collab WebSocket.
+#[derive(serde::Deserialize)]
+struct CollabWsQuery {
+    /// Device token (the mobile app's credential — see module docs).
+    token: Option<String>,
+}
+
 /// Authenticate + authorize, then upgrade the connection into the sync loop.
 async fn ws_handler(
     State(state): State<AppState>,
     Path(raw_path): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<CollabWsQuery>,
     session: Session,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // Resolve the user (dev mode -> "admin"; otherwise the session's user).
-    let Some(user_id) = session::effective_user_id(&state, &session).await else {
-        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    // Resolve the user: dev mode -> "admin"; a `?token=` device token if
+    // present (hard 401 when invalid — no session fallback, so revocation
+    // is authoritative); otherwise the session cookie.
+    let user_id = if state.config.dev_mode {
+        crate::config::DEV_MODE_USER_ID.to_string()
+    } else if let Some(token) = query.token {
+        match crate::auth::device_token::resolve(&state.db, &token).await {
+            Ok(Some(user_id)) => user_id,
+            Ok(None) => return (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            Err(err) => {
+                tracing::error!(error = %err, "collab: device token resolve failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+            }
+        }
+    } else {
+        match session::effective_user_id(&state, &session).await {
+            Some(user_id) => user_id,
+            None => return (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+        }
     };
 
     // Note id handling mirrors the REST routes exactly.

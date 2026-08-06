@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { API_BASE_URL } from '$lib/api/client';
+	import { IS_APP } from '$lib/api/deviceToken';
 	import { auth } from '$lib/stores/auth';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
@@ -16,8 +17,11 @@
 
 	function login() {
 		// Full browser navigation (not a fetch): the backend handles the OIDC
-		// flow itself and redirects back once authenticated.
-		window.location.href = `${API_BASE_URL}/auth/login`;
+		// flow itself and redirects back once authenticated. The app build asks
+		// for the device-token variant (`?client=app`): instead of a session
+		// cookie, the flow ends at `tauri.localhost/#token=<raw>` — see
+		// $lib/api/deviceToken.
+		window.location.href = `${API_BASE_URL}/auth/login${IS_APP ? '?client=app' : ''}`;
 	}
 </script>
 

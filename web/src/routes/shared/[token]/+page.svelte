@@ -156,7 +156,9 @@
 		liveContent = v;
 	}
 
-	const wordCount = $derived(liveContent.trim() === '' ? 0 : liveContent.trim().split(/\s+/).length);
+	const wordCount = $derived(
+		liveContent.trim() === '' ? 0 : liveContent.trim().split(/\s+/).length
+	);
 	const lineCount = $derived(liveContent === '' ? 0 : liveContent.split('\n').length);
 
 	const status = $derived.by(() => {

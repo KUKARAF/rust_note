@@ -18,12 +18,7 @@
 	} = $props();
 </script>
 
-<button
-	class="kv-button {variant} {size}"
-	{type}
-	{disabled}
-	onclick={(e) => onclick?.(e)}
->
+<button class="kv-button {variant} {size}" {type} {disabled} onclick={(e) => onclick?.(e)}>
 	{@render children()}
 </button>
 

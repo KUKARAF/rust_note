@@ -8,6 +8,7 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { apiGet, apiPost, ApiError } from '$lib/api/client';
+	import { cacheNotesList, readNotesListCache } from '$lib/stores/offline';
 	import Card from '$lib/design/Card.svelte';
 	import Button from '$lib/design/Button.svelte';
 	import Input from '$lib/design/Input.svelte';
@@ -24,9 +25,13 @@
 	let notes = $state<NoteMeta[]>([]);
 	let loading = $state(true);
 	let loadError = $state<string | null>(null);
+	// Timestamp of the cached list currently shown because the server is
+	// unreachable; null when the list is live.
+	let offlineCachedAt = $state<number | null>(null);
 	let filter = $state('');
 	let selectedIndex = $state(0);
 	let creating = $state(false);
+	let createError = $state<string | null>(null);
 
 	let filterInput: HTMLInputElement | undefined = $state();
 	let listEl: HTMLUListElement | undefined = $state();
@@ -45,9 +50,24 @@
 		loadError = null;
 		try {
 			notes = await apiGet<NoteMeta[]>('/api/notes');
+			// Cache for offline fallback (and mark the shown list as live).
+			cacheNotesList(notes);
+			offlineCachedAt = null;
 		} catch (err) {
 			if (err instanceof ApiError && err.status === 401) {
 				await goto(resolve('/login'));
+				return;
+			}
+			if (err instanceof ApiError && err.status === 0) {
+				// Offline: fall back to the last successfully fetched list, with
+				// a banner noting its age. No cache -> a dedicated offline error.
+				const cached = readNotesListCache();
+				if (cached) {
+					notes = cached.notes;
+					offlineCachedAt = cached.at;
+				} else {
+					loadError = "You're offline and the note list isn't cached on this device.";
+				}
 				return;
 			}
 			loadError = err instanceof Error ? err.message : 'Failed to load notes';
@@ -58,7 +78,31 @@
 
 	onMount(() => {
 		void loadNotes();
+
+		// Refresh whenever the app returns to the foreground (tab refocused,
+		// Android webview resumed), so a list opened offline goes live again as
+		// soon as connectivity is back — without a manual reload.
+		const onVisibilityChange = () => {
+			if (document.visibilityState === 'visible') void loadNotes();
+		};
+		const onFocus = () => void loadNotes();
+		document.addEventListener('visibilitychange', onVisibilityChange);
+		window.addEventListener('focus', onFocus);
+		return () => {
+			document.removeEventListener('visibilitychange', onVisibilityChange);
+			window.removeEventListener('focus', onFocus);
+		};
 	});
+
+	/** Coarse "how stale is the cached list" hint for the offline banner. */
+	function relativeAge(at: number): string {
+		const minutes = Math.round((Date.now() - at) / 60_000);
+		if (minutes < 1) return 'just now';
+		if (minutes < 60) return `${minutes}m ago`;
+		const hours = Math.round(minutes / 60);
+		if (hours < 24) return `${hours}h ago`;
+		return `${Math.round(hours / 24)}d ago`;
+	}
 
 	// Keep the selection in range whenever the filtered list changes.
 	$effect(() => {
@@ -134,12 +178,19 @@
 		const title = window.prompt('Title for the new note:');
 		if (!title || !title.trim()) return;
 		creating = true;
+		createError = null;
 		try {
 			const meta = await apiPost<NoteMeta>('/api/notes', { id_or_title: title.trim() });
 			await goto(resolve(`/notes/${encodeNotePath(meta.id)}`));
 		} catch (err) {
 			if (err instanceof ApiError && err.status === 401) {
 				await goto(resolve('/login'));
+				return;
+			}
+			if (err instanceof ApiError && err.status === 0) {
+				// Creation needs the server (it allocates the id and the git
+				// commit) — there's no offline queue for it, by design.
+				createError = "You're offline — creating notes requires a connection.";
 				return;
 			}
 			const message = err instanceof Error ? err.message : 'Failed to create note';
@@ -161,13 +212,18 @@
 			</Button>
 		</div>
 
+		{#if createError}
+			<p class="status-line error">{createError}</p>
+		{/if}
+
+		{#if offlineCachedAt !== null}
+			<p class="offline-banner">
+				offline — showing cached list ({relativeAge(offlineCachedAt)})
+			</p>
+		{/if}
+
 		<div class="filter-row">
-			<Input
-				type="text"
-				placeholder="Filter notes…"
-				bind:value={filter}
-				bind:el={filterInput}
-			>
+			<Input type="text" placeholder="Filter notes…" bind:value={filter} bind:el={filterInput}>
 				{#snippet prefix()}&gt;{/snippet}
 				{#snippet suffix()}/{/snippet}
 			</Input>
@@ -291,6 +347,13 @@
 
 	.status-line.error {
 		color: var(--kv-danger);
+	}
+
+	.offline-banner {
+		font-family: var(--font-term);
+		font-size: var(--type-meta);
+		color: var(--kv-faint);
+		margin: 0 0 var(--space-4);
 	}
 
 	.notes-count {

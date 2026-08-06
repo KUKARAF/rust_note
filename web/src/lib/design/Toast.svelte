@@ -16,7 +16,7 @@
 	<span class="kv-toast-prefix">&gt;</span>
 	<span class="kv-toast-message">{message}</span>
 	{#if showCursor}
-		<BlinkingCursor color={color} />
+		<BlinkingCursor {color} />
 	{/if}
 </div>
 

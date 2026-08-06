@@ -10,6 +10,7 @@
 	import Button from '$lib/design/Button.svelte';
 	import ShareDialog from '$lib/share/ShareDialog.svelte';
 	import { auth } from '$lib/stores/auth';
+	import { cacheNoteMeta, hasLocalCopy, markNoteSynced, readNoteMeta } from '$lib/stores/offline';
 	import {
 		createCollabSession,
 		deriveUserColor,
@@ -33,8 +34,13 @@
 
 	let { data }: PageProps = $props();
 
-	type LoadState = 'loading' | 'ok' | 'not-found' | 'forbidden' | 'error';
+	// 'offline-uncached' is the dead end: the server is unreachable AND this
+	// note has never synced on this device, so there is nothing to show.
+	type LoadState = 'loading' | 'ok' | 'not-found' | 'forbidden' | 'error' | 'offline-uncached';
 	type ConnStatus = 'connecting' | 'connected' | 'disconnected';
+	// What the REST load produced; 'offline' (network error) is not necessarily
+	// fatal — the lifecycle effect below may still open a local copy.
+	type LoadOutcome = 'ok' | 'offline' | 'failed';
 
 	let loadState = $state<LoadState>('loading');
 	let loadErrorMessage = $state<string | null>(null);
@@ -50,6 +56,12 @@
 	let session = $state<CollabSession | null>(null);
 	let connStatus = $state<ConnStatus>('connecting');
 	let synced = $state(false);
+	// Offline-first: true once y-indexeddb has loaded the locally persisted
+	// doc, which is enough to mount the editor when the server is unreachable.
+	let localReady = $state(false);
+	// True when this note was opened from its local copy (REST load failed with
+	// a network error) — drives the "edits saved locally" status chip.
+	let offlineOpen = $state(false);
 	let peers = $state<PresencePeer[]>([]);
 	let localClientId = -1;
 
@@ -63,7 +75,7 @@
 		return path.split('/').map(encodeURIComponent).join('/');
 	}
 
-	async function load(path: string): Promise<boolean> {
+	async function load(path: string): Promise<LoadOutcome> {
 		loadState = 'loading';
 		loadErrorMessage = null;
 		try {
@@ -71,24 +83,32 @@
 			meta = note.meta;
 			restContent = note.content;
 			liveContent = note.content;
+			// Remember the metadata so the note header can still render if this
+			// note is later opened offline (the CRDT copy only has content).
+			cacheNoteMeta(path, note.meta);
 			loadState = 'ok';
-			return true;
+			return 'ok';
 		} catch (err) {
 			if (err instanceof ApiError && err.status === 401) {
 				await goto(resolve('/login'));
-				return false;
+				return 'failed';
 			}
 			if (err instanceof ApiError && err.status === 404) {
 				loadState = 'not-found';
-				return false;
+				return 'failed';
 			}
 			if (err instanceof ApiError && err.status === 403) {
 				loadState = 'forbidden';
-				return false;
+				return 'failed';
+			}
+			if (err instanceof ApiError && err.status === 0) {
+				// Server unreachable — leave loadState alone; the caller decides
+				// whether a local copy makes this note openable anyway.
+				return 'offline';
 			}
 			loadState = 'error';
 			loadErrorMessage = err instanceof Error ? err.message : 'Failed to load note';
-			return false;
+			return 'failed';
 		}
 	}
 
@@ -132,6 +152,8 @@
 		// Reset per-note UI state.
 		session = null;
 		synced = false;
+		localReady = false;
+		offlineOpen = false;
 		connStatus = 'connecting';
 		peers = [];
 		localClientId = -1;
@@ -141,13 +163,47 @@
 		};
 		const onSync = (isSynced: boolean) => {
 			synced = isSynced;
+			// A full sync means y-indexeddb now holds a complete copy of the
+			// doc, so this note becomes openable offline on this device.
+			if (isSynced) markNoteSynced(path);
 		};
 
 		(async () => {
-			const ok = await load(path);
-			if (cancelled || !ok) return;
+			const outcome = await load(path);
+			if (cancelled || outcome === 'failed') return;
+			if (outcome === 'offline') {
+				if (!hasLocalCopy(path)) {
+					// Offline and never synced here: dead end (rendered below).
+					loadState = 'offline-uncached';
+					return;
+				}
+				// Offline, but the doc has a local CRDT copy: open from it. Meta
+				// comes from the per-note cache (a stub if that's missing — it
+				// only feeds the title/header), and the collab session is still
+				// created: y-indexeddb loads the doc while y-websocket keeps
+				// retrying in the background and merges once we're back online.
+				meta = readNoteMeta(path) ?? {
+					id: path,
+					title: path.split('/').pop() ?? path,
+					owner_id: '',
+					created_at: '',
+					updated_at: '',
+					version: ''
+				};
+				restContent = '';
+				liveContent = '';
+				offlineOpen = true;
+				loadState = 'ok';
+			}
 
 			sess = createCollabSession(path, currentUser());
+			if (outcome === 'offline') {
+				// Mount the editor as soon as the local copy is in, without
+				// waiting for a websocket sync that may never come.
+				void sess.whenLocalLoaded.then(() => {
+					if (!cancelled) localReady = true;
+				});
+			}
 			localClientId = sess.awareness.clientID;
 			const onAwareness = () => sess && refreshPeers(sess);
 
@@ -182,7 +238,9 @@
 	// commit), so no unsaved-changes prompt is needed for the common case.
 	beforeNavigate((navigation) => {
 		if (loadState !== 'ok') return;
-		if (synced) return; // live edits are already syncing/persisting
+		// Synced edits persist server-side; offline edits persist in IndexedDB
+		// and merge on reconnect — either way, leaving loses nothing.
+		if (synced || localReady) return;
 		if (liveContent === restContent) return; // nothing typed yet
 		if (!confirm('This note is still connecting — leave before your changes sync?')) {
 			navigation.cancel();
@@ -211,7 +269,9 @@
 		}
 	}
 
-	const wordCount = $derived(liveContent.trim() === '' ? 0 : liveContent.trim().split(/\s+/).length);
+	const wordCount = $derived(
+		liveContent.trim() === '' ? 0 : liveContent.trim().split(/\s+/).length
+	);
 	const lineCount = $derived(liveContent === '' ? 0 : liveContent.split('\n').length);
 
 	// Split `data.path` into a dimmed "folder" portion and a bright filename.
@@ -223,6 +283,15 @@
 
 	// Sync-status indicator model.
 	const status = $derived.by(() => {
+		if (offlineOpen && connStatus !== 'connected') {
+			// Opened from the local copy and still offline: edits land in
+			// IndexedDB and sync automatically once the server is reachable.
+			return {
+				label: 'offline — edits saved locally',
+				tone: 'warn' as const,
+				dot: 'var(--kv-orange)'
+			};
+		}
 		if (connStatus === 'disconnected') {
 			return { label: 'offline · reconnecting', tone: 'warn' as const, dot: 'var(--kv-orange)' };
 		}
@@ -248,6 +317,8 @@
 	<p class="center-message dim">Note not found: <code>{data.path}</code></p>
 {:else if loadState === 'forbidden'}
 	<p class="center-message warn">You don't have access to this note.</p>
+{:else if loadState === 'offline-uncached'}
+	<p class="center-message warn">You're offline and this note isn't cached on this device.</p>
 {:else if loadState === 'error'}
 	<p class="center-message danger">Error loading note: {loadErrorMessage}</p>
 {:else if meta}
@@ -260,9 +331,7 @@
 			</h1>
 			<div class="editor-header-actions">
 				<CollabPresence {peers} />
-				<Button variant="outline" size="sm" onclick={() => (shareDialogOpen = true)}>
-					Share
-				</Button>
+				<Button variant="outline" size="sm" onclick={() => (shareDialogOpen = true)}>Share</Button>
 			</div>
 		</div>
 
@@ -274,8 +343,9 @@
 			/>
 		{/if}
 
-		{#if session && synced}
-			<!-- Live collaborative editor: seeded from the synced CRDT. -->
+		{#if session && (synced || localReady)}
+			<!-- Live collaborative editor: seeded from the synced CRDT (or the
+			     local IndexedDB copy when opened offline). -->
 			<CodeMirrorEditor
 				collab={{
 					ytext: session.ytext,

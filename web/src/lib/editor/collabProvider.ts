@@ -9,8 +9,11 @@
 
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
+import { IndexeddbPersistence } from 'y-indexeddb';
 import type { Awareness } from 'y-protocols/awareness';
 import { API_BASE_URL } from '$lib/api/client';
+import { getDeviceToken } from '$lib/api/deviceToken';
+import { listSyncedNotes } from '$lib/stores/offline';
 
 /** Identity used to render this client's caret/label and presence chip. */
 export interface CollabUser {
@@ -27,6 +30,18 @@ export interface CollabSession {
 	/** Undo/redo scoped to local edits (see y-codemirror.next). */
 	undoManager: Y.UndoManager;
 	awareness: Awareness;
+	/**
+	 * Local IndexedDB persistence of the doc (offline-first). Only present for
+	 * authed sessions — guest share links don't persist anything locally.
+	 */
+	persistence: IndexeddbPersistence | null;
+	/**
+	 * Resolves once the locally persisted copy of the doc (if any) has been
+	 * loaded into `doc`. For sessions without persistence it is already
+	 * resolved. Lets the editor open a previously-synced note while offline
+	 * without waiting for the (unreachable) websocket.
+	 */
+	whenLocalLoaded: Promise<void>;
 	/** Tear down the provider + doc + undo manager. Safe to call once. */
 	destroy(): void;
 }
@@ -75,11 +90,22 @@ function connectSession(
 	wsBaseUrl: string,
 	roomName: string,
 	user: CollabUser,
+	persistenceName: string | null,
 	providerOptions: ConstructorParameters<typeof WebsocketProvider>[3] = {}
 ): CollabSession {
 	const doc = new Y.Doc();
 	// Bind to the exact field name the backend seeds and the editor reads.
 	const ytext = doc.getText('content');
+
+	// Offline-first: mirror the doc into IndexedDB *before* connecting, so a
+	// previously-synced note loads (and stays editable) with no network, and
+	// edits made offline are stored locally until the websocket reconnects and
+	// the CRDTs merge. `whenSynced` here means "local copy loaded", nothing to
+	// do with the server.
+	const persistence =
+		persistenceName !== null ? new IndexeddbPersistence(persistenceName, doc) : null;
+	const whenLocalLoaded: Promise<void> =
+		persistence !== null ? persistence.whenSynced.then(() => undefined) : Promise.resolve();
 
 	const provider = new WebsocketProvider(wsBaseUrl, roomName, doc, providerOptions);
 
@@ -97,24 +123,79 @@ function connectSession(
 		ytext,
 		undoManager,
 		awareness: provider.awareness,
+		persistence,
+		whenLocalLoaded,
 		destroy() {
 			if (destroyed) return;
 			destroyed = true;
 			undoManager.destroy();
 			// Removes local awareness state, closes the socket, unsubscribes bc.
 			provider.destroy();
+			// Detaches from the doc and closes the DB connection — the stored
+			// data itself is kept (that's the point; logout wipes it via
+			// `clearAllLocalNotes`).
+			void persistence?.destroy();
 			doc.destroy();
 		}
 	};
 }
 
+/**
+ * Prefix for the per-note IndexedDB database names used by y-indexeddb.
+ * `clearAllLocalNotes()` matches on this prefix, so keep them in sync.
+ */
+const LOCAL_NOTE_DB_PREFIX = 'rustnote-note:';
+
 export function createCollabSession(noteId: string, user: CollabUser): CollabSession {
-	return connectSession(collabWsBaseUrl(), encodeRoomName(noteId), user, {
-		// Cookies/session ride along automatically on same-origin; in the
-		// cross-origin dev setup the session isn't required (every connection is
-		// `admin`). Standard provider config — no custom URL munging needed.
-		// (BroadcastChannel left enabled so multiple tabs on the same origin
-		// sync instantly without a server round-trip.)
+	// App build: websockets can't carry an Authorization header, so the device
+	// token rides along as a `?token=` query param instead (y-websocket appends
+	// `params` to the connection URL). On the website build there is no token
+	// and cookies/session ride along automatically on same-origin; in the
+	// cross-origin dev setup the session isn't required (every connection is
+	// `admin`). (BroadcastChannel left enabled so multiple tabs on the same
+	// origin sync instantly without a server round-trip.)
+	const token = getDeviceToken();
+	return connectSession(
+		collabWsBaseUrl(),
+		encodeRoomName(noteId),
+		user,
+		// Local persistence is keyed by the *raw* note path (same value the
+		// offline synced-notes registry stores), not the encoded room name.
+		`${LOCAL_NOTE_DB_PREFIX}${noteId}`,
+		token !== null ? { params: { token } } : {}
+	);
+}
+
+/**
+ * Delete every locally persisted note doc (the `rustnote-note:*` IndexedDB
+ * databases). Called on logout so note content doesn't linger on a shared
+ * device. `indexedDB.databases()` isn't universal (notably older Firefox), so
+ * when unavailable the DB names are reconstructed from the offline store's
+ * synced-notes registry — meaning this must run BEFORE the registry itself is
+ * cleared.
+ */
+export async function clearAllLocalNotes(): Promise<void> {
+	let names: string[];
+	if (typeof indexedDB.databases === 'function') {
+		const dbs = await indexedDB.databases();
+		names = dbs
+			.map((db) => db.name)
+			.filter((name): name is string => !!name && name.startsWith(LOCAL_NOTE_DB_PREFIX));
+	} else {
+		names = listSyncedNotes().map((path) => `${LOCAL_NOTE_DB_PREFIX}${path}`);
+	}
+	await Promise.all(names.map(deleteIndexedDb));
+}
+
+function deleteIndexedDb(name: string): Promise<void> {
+	return new Promise((resolve) => {
+		const request = indexedDB.deleteDatabase(name);
+		request.onsuccess = () => resolve();
+		// Never block logout on a stubborn DB: on error just move on, and on
+		// `blocked` (another tab still holds a connection) the deletion will
+		// complete once that connection closes — no need to wait here.
+		request.onerror = () => resolve();
+		request.onblocked = () => resolve();
 	});
 }
 
@@ -137,6 +218,7 @@ export function collabSharedWsBaseUrl(): string {
  */
 export function createGuestCollabSession(token: string, user: CollabUser): CollabSession {
 	// Tokens are opaque (no '/'), but encode defensively anyway in case that
-	// ever changes.
-	return connectSession(collabSharedWsBaseUrl(), encodeURIComponent(token), user, {});
+	// ever changes. No local persistence: guests shouldn't leave note content
+	// behind on whatever machine they opened the link on.
+	return connectSession(collabSharedWsBaseUrl(), encodeURIComponent(token), user, null, {});
 }

@@ -18,6 +18,10 @@
 export const API_BASE_URL: string =
 	(import.meta.env.PUBLIC_API_BASE_URL as string | undefined) ?? window.location.origin;
 
+// Device token for the Tauri app build (bearer auth instead of cookies) —
+// `getDeviceToken()` returns null on the website build, so nothing changes there.
+import { getDeviceToken } from './deviceToken';
+
 /** Thrown by the request helpers below on any non-2xx response or network failure. */
 export class ApiError extends Error {
 	/** HTTP status code, or 0 if the request never reached the server (network error). */
@@ -47,6 +51,7 @@ async function request<TResponse>(
 	options: RequestOptions = {}
 ): Promise<TResponse> {
 	const url = path.startsWith('http') ? path : `${API_BASE_URL}${path}`;
+	const deviceToken = getDeviceToken();
 
 	let response: Response;
 	try {
@@ -59,6 +64,10 @@ async function request<TResponse>(
 			headers: {
 				...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
 				Accept: 'application/json',
+				// App build: authenticate with the stored device token (cookies
+				// don't reliably cross the tauri.localhost <-> backend origin
+				// split). Spread before options.headers so callers can override.
+				...(deviceToken !== null ? { Authorization: `Bearer ${deviceToken}` } : {}),
 				...options.headers
 			},
 			body: body !== undefined ? JSON.stringify(body) : undefined,

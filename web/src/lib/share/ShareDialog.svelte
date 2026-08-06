@@ -197,7 +197,10 @@
 								class="share-chip-btn"
 								onclick={() => (expiresIn = value as ExpiresIn)}
 							>
-								<Chip color={expiresIn === value ? 'accent' : 'dim'} variant={expiresIn === value ? 'tint' : 'outline'}>
+								<Chip
+									color={expiresIn === value ? 'accent' : 'dim'}
+									variant={expiresIn === value ? 'tint' : 'outline'}
+								>
 									{label}
 								</Chip>
 							</button>
@@ -246,14 +249,14 @@
 							{#each links as link (link.token)}
 								<li class="share-link-row">
 									<div class="share-link-meta">
-										<Chip color={link.permission === 'edit' ? 'orange' : 'accent'} variant="outline">
+										<Chip
+											color={link.permission === 'edit' ? 'orange' : 'accent'}
+											variant="outline"
+										>
 											{link.permission}
 										</Chip>
 										<span class="share-link-token">…{link.token.slice(-8)}</span>
-										<span
-											class="share-link-expiry"
-											class:danger={link.status === 'expired'}
-										>
+										<span class="share-link-expiry" class:danger={link.status === 'expired'}>
 											{formatExpiry(link)}
 										</span>
 									</div>
