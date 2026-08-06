@@ -12,8 +12,14 @@ import { WebsocketProvider } from 'y-websocket';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import type { Awareness } from 'y-protocols/awareness';
 import { API_BASE_URL } from '$lib/api/client';
-import { getDeviceToken } from '$lib/api/deviceToken';
+import { getDeviceToken, IS_APP } from '$lib/api/deviceToken';
 import { listSyncedNotes } from '$lib/stores/offline';
+// Note: noteMirror imports LOCAL_NOTE_DB_PREFIX back from this module — a
+// benign cycle, since both sides only touch the other's exports at call time
+// (never during module evaluation). `scheduleMirror` itself is a cheap sync
+// gate on the website build; the android-fs plugin is only dynamically
+// imported inside it on the app build.
+import { scheduleMirror } from '$lib/app/noteMirror';
 
 /** Identity used to render this client's caret/label and presence chip. */
 export interface CollabUser {
@@ -142,9 +148,11 @@ function connectSession(
 
 /**
  * Prefix for the per-note IndexedDB database names used by y-indexeddb.
- * `clearAllLocalNotes()` matches on this prefix, so keep them in sync.
+ * `clearAllLocalNotes()` matches on this prefix, so keep them in sync (the
+ * Android notes-folder mirror also loads local docs by this prefix, see
+ * `$lib/app/noteMirror`).
  */
-const LOCAL_NOTE_DB_PREFIX = 'rustnote-note:';
+export const LOCAL_NOTE_DB_PREFIX = 'rustnote-note:';
 
 export function createCollabSession(noteId: string, user: CollabUser): CollabSession {
 	// App build: websockets can't carry an Authorization header, so the device
@@ -155,7 +163,7 @@ export function createCollabSession(noteId: string, user: CollabUser): CollabSes
 	// `admin`). (BroadcastChannel left enabled so multiple tabs on the same
 	// origin sync instantly without a server round-trip.)
 	const token = getDeviceToken();
-	return connectSession(
+	const session = connectSession(
 		collabWsBaseUrl(),
 		encodeRoomName(noteId),
 		user,
@@ -164,6 +172,25 @@ export function createCollabSession(noteId: string, user: CollabUser): CollabSes
 		`${LOCAL_NOTE_DB_PREFIX}${noteId}`,
 		token !== null ? { params: { token } } : {}
 	);
+
+	// App build: keep the mirror folder's .md copy of this note fresh. Every
+	// content change funnels through `doc.on('update')` (local typing, remote
+	// edits, AND the initial y-indexeddb load), plus the provider's `sync`
+	// event covers the "server had newer state" case where the initial merge
+	// already fired updates before the mirror could matter. scheduleMirror
+	// debounces per note (~2s trailing), so this firehose is cheap. Both
+	// listeners are registered on the doc/provider themselves, so
+	// `session.destroy()` (provider.destroy + doc.destroy) tears them down —
+	// no dangling observers to clean up here.
+	if (IS_APP) {
+		const mirror = () => scheduleMirror(noteId, () => session.ytext.toString());
+		session.provider.on('sync', (isSynced: boolean) => {
+			if (isSynced) mirror();
+		});
+		session.doc.on('update', mirror);
+	}
+
+	return session;
 }
 
 /**

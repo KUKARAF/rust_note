@@ -15,5 +15,23 @@ path = "src/lib.rs"
 rust-note-core = { workspace = true }
 tauri = { workspace = true }
 
+# Injects the Android system-bar insets as CSS variables
+# (--safe-area-inset-*) on the webview's documentElement — the Android
+# System WebView doesn't reliably plumb env(safe-area-inset-*) (returns 0
+# before WebView 140), and the generated gen/android project can't be
+# customized (CI regenerates it), so a plugin is the only persistable fix.
+# Pinned exactly: young single-maintainer crate; its published permission
+# set is broken (references a nonexistent `ping` command), so it must NOT
+# be listed in capabilities/ — the CSS injection is automatic on load and
+# needs no permissions.
+tauri-plugin-edge-to-edge = "=0.3.3"
+
+# Android SAF (Storage Access Framework) folder picker + persisted grants,
+# used by the notes-folder mirror. Core tauri-plugin-fs/-dialog cannot pick
+# directories on Android. The npm bindings (web/package.json:
+# tauri-plugin-android-fs-api) must stay on the EXACT same version as this
+# crate — the IPC contract between them is version-locked.
+tauri-plugin-android-fs = "=29.0.0"
+
 [build-dependencies]
 tauri-build = { version = "2" }

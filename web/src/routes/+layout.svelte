@@ -15,10 +15,26 @@
 		clearAllNoteMeta,
 		clearCachedUser
 	} from '$lib/stores/offline';
+	import { shouldPromptForMirror, clearMirrorLocalState } from '$lib/app/noteMirror';
+	import MirrorFolderDialog from '$lib/app/MirrorFolderDialog.svelte';
 	import Button from '$lib/design/Button.svelte';
 	import BlinkingCursor from '$lib/design/BlinkingCursor.svelte';
 
 	let { children } = $props();
+
+	let mirrorPromptOpen = $state(false);
+	// The prompt check should run exactly once per app start, the first time a
+	// logged-in user materializes (whether via a fresh /auth/me or the offline
+	// cache) — not again on later store updates. Fire-and-forget so startup
+	// never blocks on the (dynamically imported) android-fs plugin.
+	let mirrorPromptChecked = false;
+	$effect(() => {
+		if (!IS_APP || mirrorPromptChecked || $auth.user === null) return;
+		mirrorPromptChecked = true;
+		void shouldPromptForMirror().then((prompt) => {
+			if (prompt) mirrorPromptOpen = true;
+		});
+	});
 
 	onMount(() => {
 		// App build: the backend finishes the OIDC flow by redirecting to
@@ -65,6 +81,9 @@
 			clearNotesListCache();
 			clearAllNoteMeta();
 			clearCachedUser();
+			// Drops the mirror's file map + prompt dismissal, but keeps the
+			// folder grant — the mirrored files are the user's own storage.
+			clearMirrorLocalState();
 			window.location.href = '/';
 		}
 	}
@@ -95,6 +114,8 @@
 	</main>
 </div>
 
+<MirrorFolderDialog open={mirrorPromptOpen} onclose={() => (mirrorPromptOpen = false)} />
+
 <style>
 	.app-shell {
 		display: flex;
@@ -108,6 +129,8 @@
 		align-items: center;
 		gap: var(--space-6);
 		padding: var(--space-5) var(--screen-gutter);
+		/* Keep the nav clear of the Android status bar / display cutout. */
+		padding-top: calc(var(--space-5) + var(--safe-top));
 		background: var(--surface-card);
 		border-bottom: 1px solid var(--border-default);
 	}
@@ -155,5 +178,7 @@
 	.app-content {
 		flex: 1;
 		padding: var(--screen-gutter);
+		/* Keep content clear of the Android gesture-nav / home-indicator area. */
+		padding-bottom: calc(var(--screen-gutter) + var(--safe-bottom));
 	}
 </style>

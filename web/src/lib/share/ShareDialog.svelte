@@ -297,7 +297,10 @@
 		display: flex;
 		align-items: flex-start;
 		justify-content: center;
-		padding: var(--space-9) var(--space-6);
+		/* Safe-area padding so the dialog never sits under the Android
+		   status/navigation bars in the edge-to-edge app. */
+		padding: calc(var(--space-9) + var(--safe-top)) calc(var(--space-6) + var(--safe-right))
+			calc(var(--space-9) + var(--safe-bottom)) calc(var(--space-6) + var(--safe-left));
 		overflow-y: auto;
 		z-index: 100;
 	}

@@ -16,7 +16,7 @@
 <style>
 	.command-palette-placeholder {
 		position: fixed;
-		top: 20%;
+		top: calc(var(--safe-top) + 20%);
 		left: 50%;
 		transform: translateX(-50%);
 		border: 1px solid #999;

@@ -97,6 +97,17 @@
 	--screen-gutter: 14px;
 	--tap-target: 44px;
 
+	/* Safe-area insets (Android/iOS edge-to-edge). On the Android app,
+	   tauri-plugin-edge-to-edge injects --safe-area-inset-* as inline styles
+	   on documentElement (the Android System WebView doesn't reliably supply
+	   env(safe-area-inset-*) before WebView 140); env() is the fallback for
+	   platforms that do supply it (requires viewport-fit=cover in app.html).
+	   On the plain website both collapse to 0px. */
+	--safe-top: max(var(--safe-area-inset-top, 0px), env(safe-area-inset-top, 0px));
+	--safe-bottom: max(var(--safe-area-inset-bottom, 0px), env(safe-area-inset-bottom, 0px));
+	--safe-left: max(var(--safe-area-inset-left, 0px), env(safe-area-inset-left, 0px));
+	--safe-right: max(var(--safe-area-inset-right, 0px), env(safe-area-inset-right, 0px));
+
 	/* Effects */
 	--glow-accent: 0 0 6px rgba(121, 242, 121, 0.45);
 	--glow-orange: 0 0 6px rgba(255, 177, 61, 0.4);

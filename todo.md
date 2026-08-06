@@ -50,3 +50,21 @@
 - [ ] **App webview CSP**: `crates/mobile/tauri.conf.json` has `csp: null`;
   hardening follow-up is `connect-src https://notes.osmosis.page
   wss://notes.osmosis.page` so the webview can only talk to the real backend.
+- [ ] **Two-way folder import** (folder → app): the notes-folder mirror is
+  one-way (app → `.md` files) in v1. Importing external edits back requires
+  change detection over SAF (no file watchers), conflict handling against the
+  CRDT doc, and deciding authority — deliberately deferred.
+- [ ] **Keyboard-inset polish**: `tauri-plugin-edge-to-edge` also injects
+  `--keyboard-height` / `--keyboard-visible`; use them to keep the editor's
+  focused line above the soft keyboard.
+- [ ] **File-like config entries in the app** (requested 2026-08-07): pin
+  `settings`, `notes_sync`, and `select folder` as file-looking entries in the
+  app's notes list. Server-side reserved namespace of real notes:
+  `.config/settings` (settings are ALREADY stored as a per-user frontmatter
+  note server-side — surface it) and `.config/sync/<device>` (per-device
+  mirror record: folder display name, enabled, last-mirror time; keyed by the
+  device's token so a user's multiple devices each get their own). The SAF
+  folder *grant* itself cannot be stored server-side (device-local Android
+  security object; must be picked once per device) — only the record of it
+  roams. `select folder` entry triggers the SAF picker and writes the result
+  into the device's sync note.
