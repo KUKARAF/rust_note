@@ -75,7 +75,16 @@ jobs:
           npm run build
 
       - name: Install Tauri CLI
-        run: npm install -g @tauri-apps/cli@2
+        # Prebuilt binary via cargo-binstall (seconds, vs 5-10 min for
+        # `cargo install`). Must be the cargo subcommand, NOT the npm CLI:
+        # the generated Gradle project records how the CLI was invoked and
+        # re-runs it from crates/mobile during :app:rustBuild*, and the npm
+        # global shim gets recorded as `node tauri`, which fails there
+        # ("Cannot find module .../crates/mobile/tauri"). `cargo tauri`
+        # resolves from PATH regardless of working directory.
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall -y 'tauri-cli@^2'
 
       - name: Export Android NDK env
         # ANDROID_HOME is preset by the runner image; ANDROID_NDK_LATEST_HOME
@@ -85,11 +94,11 @@ jobs:
 
       - name: Generate Android project
         working-directory: crates/mobile
-        run: tauri android init --skip-targets-install
+        run: cargo tauri android init --skip-targets-install
 
       - name: Build unsigned release APK (arm64 + arm)
         working-directory: crates/mobile
-        run: tauri android build --apk --target aarch64 --target armv7
+        run: cargo tauri android build --apk --target aarch64 --target armv7
 
       - name: Sign APK (zipalign + apksigner)
         env:

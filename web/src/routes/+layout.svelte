@@ -5,7 +5,7 @@
 	import { onMount } from 'svelte';
 	import { auth, loadUser } from '$lib/stores/auth';
 	import { settings, loadSettings } from '$lib/stores/settings';
-	import { API_BASE_URL } from '$lib/api/client';
+	import { apiPost } from '$lib/api/client';
 	import Button from '$lib/design/Button.svelte';
 	import BlinkingCursor from '$lib/design/BlinkingCursor.svelte';
 
@@ -22,11 +22,17 @@
 		document.documentElement.dataset.theme = $settings.theme;
 	});
 
-	function logout() {
-		// Navigate (not fetch) so the backend's redirect response is followed
-		// by the browser and any session cookie clearing happens as part of a
-		// normal top-level navigation.
-		window.location.href = `${API_BASE_URL}/auth/logout`;
+	async function logout() {
+		// POST via fetch: the route is POST-only on purpose (a GET logout
+		// could be forced cross-site by e.g. an <img> tag or link
+		// prefetching). Set-Cookie on a fetch response clears the session
+		// cookie just as well; the hard navigation afterwards resets all
+		// client state regardless of whether the request succeeded.
+		try {
+			await apiPost('/auth/logout');
+		} finally {
+			window.location.href = '/';
+		}
 	}
 </script>
 

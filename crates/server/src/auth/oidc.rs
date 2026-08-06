@@ -298,7 +298,13 @@ async fn logout(session: tower_sessions::Session) -> AppResult<impl axum::respon
     // stays alive - only the rust_note session is destroyed. Wiring up
     // full single-logout is a reasonable follow-up but isn't necessary for
     // Phase 1.
-    Ok(Redirect::to("/"))
+    //
+    // 204 rather than a redirect: this route is POST-only (GET logout can be
+    // forced cross-site via e.g. an <img> tag or link prefetching, and
+    // SameSite=Lax does not stop top-level GET navigations), so the frontend
+    // calls it with a fetch POST and performs its own navigation afterwards -
+    // fetch would just silently chase a redirect here.
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Serialize)]
