@@ -1,0 +1,23 @@
+[package]
+name = "rust-note-core"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "rust_note_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+
+# Phase 2 (CRDT sync). `yrs` bundles the sync + awareness protocol at
+# `yrs::sync`; no separate protocol crate. Not yet used in core code.
+yrs = { workspace = true }

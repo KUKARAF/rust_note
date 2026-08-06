@@ -1,0 +1,97 @@
+name: Android Nightly APK
+
+# Builds a DEBUG APK on every push to main that touches APK-relevant code and
+# publishes it as a rolling `nightly` pre-release (tag + release are recreated
+# each run so the tag always points at the built commit).
+#
+# The debug APK is signed automatically by the Android Gradle Plugin with an
+# auto-generated debug keystore, so it installs on any device and needs no
+# repo secrets. Not for production distribution - tags produce the real
+# signed release (see android-release.yml).
+#
+# See android-release.yml for why `tauri android init` runs in CI instead of
+# committing crates/mobile/gen/.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/mobile/**"
+      - "crates/core/**"
+      - "web/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/android-nightly.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-nightly
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install stable Rust with Android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli@2
+
+      - name: Export Android NDK env
+        # ANDROID_HOME is preset by the runner image; ANDROID_NDK_LATEST_HOME
+        # is a machine env var not visible to the ${{ env }} context, so
+        # re-export it under the name the Tauri CLI expects.
+        run: echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+
+      - name: Generate Android project
+        working-directory: crates/mobile
+        run: tauri android init --skip-targets-install
+
+      - name: Build debug APK (arm64)
+        working-directory: crates/mobile
+        run: tauri android build --apk --debug --target aarch64
+
+      - name: Publish rolling nightly pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK=crates/mobile/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+          cp "$APK" "rust-note-nightly-${GITHUB_SHA::7}.apk"
+          # Delete + recreate so the `nightly` tag moves to the current
+          # commit; uploading over the old release would leave the tag (and
+          # the release's source snapshot) pointing at a stale commit.
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly \
+            --prerelease \
+            --title "Nightly debug APK (${GITHUB_SHA::7})" \
+            --notes "Automated debug build of ${GITHUB_SHA} from main. Debug-signed; not for production." \
+            "rust-note-nightly-${GITHUB_SHA::7}.apk"

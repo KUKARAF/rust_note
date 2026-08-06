@@ -1,0 +1,14 @@
+# Workspace-wide Clippy configuration.
+#
+# From the "Rust: Don't Panic" video (No Boilerplate,
+# https://www.youtube.com/watch?v=usRlRCNIOG0), used as the basis for this
+# project's CI panic-safety gate (see .github/workflows/ci-required.yml):
+# "you can have your cake and eat it too" - the panic-safety lints
+# (unwrap_used, expect_used, panic, etc., see [workspace.lints.clippy] in the
+# root Cargo.toml) are enforced in production code, but test code is exempt
+# by default so prototyping/asserting in `#[cfg(test)]` stays ergonomic.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true

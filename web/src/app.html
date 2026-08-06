@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="text-scale" content="scale" />
+
+		<!-- Security: safe, host-independent meta tags. -->
+		<meta name="referrer" content="strict-origin-when-cross-origin" />
+
+		<!--
+			Content-Security-Policy is intentionally NOT set here as a <meta http-equiv>.
+			Reasons:
+			  * A meta CSP is ALWAYS enforcing (report-only is not supported via meta),
+			    and the SvelteKit static build emits an inline bootstrap <script> with
+			    no nonce, so it would need script-src 'unsafe-inline' to boot at all.
+			  * connect-src must allow the backend HTTP+WS origin, which is configurable
+			    (PUBLIC_API_BASE_URL) and unknown at build time. Baking a localhost-only
+			    CSP into the static build would break cross-origin API/WebSocket calls in
+			    production.
+			  * Several key directives (frame-ancestors, X-Frame-Options) only work as
+			    real HTTP headers, not via meta.
+			Set the CSP and the remaining headers at the reverse proxy / static host.
+			See web/SECURITY-HEADERS.md for the exact recommended policy. The intended
+			CSP (adjust connect-src for your real API/WS origin) is:
+
+			  default-src 'self';
+			  script-src 'self' 'unsafe-inline';
+			  style-src 'self' 'unsafe-inline';
+			  font-src 'self';
+			  img-src 'self' data:;
+			  connect-src 'self' http://localhost:8080 http://127.0.0.1:8080 ws://localhost:8080 ws://127.0.0.1:8080;
+			  object-src 'none';
+			  base-uri 'self';
+			  frame-ancestors 'none'
+		-->
+
+		<!--
+			Pre-paint theme application: runs synchronously before the app bundle
+			mounts (and before any styled content paints) so the cached theme is
+			applied with no flash-of-wrong-theme. Currently a visual no-op since
+			only one theme ("ration") exists, but establishes the mechanism for
+			when a second theme ships. Kept in sync with the fallback logic in
+			`$lib/stores/settings.ts` (`readCachedTheme`/`STORAGE_KEY`).
+		-->
+		<script>
+			(function () {
+				try {
+					var t = localStorage.getItem('rust-note-theme');
+					document.documentElement.dataset.theme = t === 'ration' ? t : 'ration';
+				} catch (e) {}
+			})();
+		</script>
+
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

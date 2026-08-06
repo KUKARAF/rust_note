@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "rust-note",
+  "version": "0.1.0",
+  "identifier": "dev.rustnote.app",
+  "build": {
+    "frontendDist": "../../web/build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "rust-note",
+        "width": 1024,
+        "height": 768
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

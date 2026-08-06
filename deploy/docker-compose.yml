@@ -1,0 +1,40 @@
+services:
+  rustnote:
+    image: rust-note:latest
+    container_name: rustnote
+    restart: unless-stopped
+    # Matches the host `rafa` user (uid/gid 1004 on bigboy) so the container
+    # can write into the bind-mounted /mnt/raid/vimwiki without needing to
+    # chown anything on the host. Update this if deployed under a different
+    # host user.
+    user: "1004:1004"
+    env_file:
+      - .env
+    environment:
+      - RUSTNOTE_BASE_URL=https://notes.osmosis.page
+      - RUSTNOTE_AUTHENTIK_ISSUER_URL=https://auth.osmosis.page/application/o/notes/
+      - RUSTNOTE_OIDC_CLIENT_ID=rIq6SL3NMsYSuPD3cFm3B4GUD11GAoGTcjQZxVvV
+      - RUSTNOTE_OIDC_REDIRECT_URI=https://notes.osmosis.page/auth/callback
+      # No RUSTNOTE_OIDC_CLIENT_SECRET: this Authentik provider is a Public
+      # client (PKCE-only, no shared secret) - matches how Anchor, the
+      # service this replaces, was already configured.
+      #
+      # db.sqlite (not rust_note.db): an earlier boot attempt, before the
+      # `user:` override above was added, left behind rust_note.db/-wal/-shm
+      # files with inconsistent ownership/WAL state. Per instructions not to
+      # delete anything, those are left in place untouched (harmless orphans
+      # in this volume) and the app is pointed at a fresh filename instead.
+      - RUSTNOTE_SQLITE_PATH=/data/db/db.sqlite
+    volumes:
+      - /mnt/raid/vimwiki:/data/notes
+      - rustnote_db:/data/db
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
+    name: caddy_proxy
+
+volumes:
+  rustnote_db:

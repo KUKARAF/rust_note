@@ -1,0 +1,56 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[dependencies]
+rust-note-core = { workspace = true }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+axum-extra = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tower-sessions = { workspace = true }
+tower-sessions-sqlx-store = { workspace = true }
+
+sqlx = { workspace = true }
+git2 = { workspace = true }
+openidconnect = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+base64 = { workspace = true }
+time = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Phase 2 (CRDT collab). `yrs` 0.26 provides Doc/Text plus the full Yjs
+# sync + awareness wire protocol in-crate at `yrs::sync`. No `y-sync`
+# (archived, yrs 0.17) or `yrs-axum` (yrs 0.18) — both pulled mismatched
+# yrs copies. The Axum WebSocket transport is hand-rolled in `collab`.
+#
+# The `sync` feature switches yrs' internal `Doc`/`Awareness` storage from
+# `Rc`/`RefCell` to `Arc`/`RwLock`, making it genuinely `Send + Sync` (yrs
+# ships an `unsafe impl Send + Sync for Doc` regardless, but that is only
+# *sound* with the thread-safe internals this feature enables). The collab
+# room shares one `Doc`/`Awareness` across Tokio worker threads (behind a
+# `std::sync::Mutex`), so this is required for correctness — and it also
+# gives the observer callbacks / `Subscription` the `Send + Sync` bounds.
+yrs = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

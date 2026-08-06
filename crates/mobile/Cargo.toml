@@ -1,0 +1,19 @@
+[package]
+name = "mobile"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "rust_note_mobile"
+crate-type = ["staticlib", "cdylib", "lib"]
+path = "src/lib.rs"
+
+[dependencies]
+rust-note-core = { workspace = true }
+tauri = { workspace = true }
+
+[build-dependencies]
+tauri-build = { version = "2" }

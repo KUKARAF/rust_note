@@ -1,0 +1,43 @@
+# Rust
+/target/
+**/target/
+*.pdb
+
+# Node / web frontend
+node_modules/
+web/build/
+web/.svelte-kit/
+.svelte-kit/
+dist/
+
+# Env / secrets
+.env
+.env.*
+*.env
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Claude Code local state
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# IDE
+.vscode/
+.idea/
+*.iml
+.DS_Store
+
+# Logs
+*.log
+
+# Tauri Android scaffolding is generated in CI by `tauri android init`
+crates/mobile/gen/
+
+# Android signing keys - never commit
+*.keystore
+*.jks

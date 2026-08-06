@@ -1,0 +1,163 @@
+/*
+ * RATION Notes design tokens — CRT-phosphor terminal theme.
+ * Imported once from the root layout so every route gets the theme.
+ */
+
+/*
+ * Self-hosted fonts (latin subset, weight 400) served from /fonts/ by
+ * adapter-static. Replaces a runtime @import from fonts.googleapis.com so
+ * pages load with no external font dependency (privacy, offline/LAN, strict CSP).
+ * Both families are Open Font License.
+ */
+@font-face {
+	font-family: 'Press Start 2P';
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url('/fonts/press-start-2p-latin-400.woff2') format('woff2');
+}
+@font-face {
+	font-family: 'VT323';
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url('/fonts/vt323-latin-400.woff2') format('woff2');
+}
+
+:root,
+[data-theme='ration'] {
+	--kv-bg: #070b07;
+	--kv-panel: #0c120c;
+	--kv-panel-2: #0f160f;
+	--kv-input-bg: #070d07;
+
+	--kv-accent: #79f279;
+	--kv-accent-ink: #06210a;
+	--kv-orange: #ffb13d;
+	--kv-orange-ink: #1a0f00;
+	--kv-danger: #ff6b6b;
+	--kv-danger-ink: #1a0000;
+
+	--kv-ink: #e6f0e6;
+	--kv-dim: #728c72;
+	--kv-faint: #243024;
+	--kv-placeholder: #3f5840;
+
+	--surface-bg: var(--kv-bg);
+	--surface-card: var(--kv-panel);
+	--surface-raised: var(--kv-panel-2);
+	--surface-input: var(--kv-input-bg);
+
+	--text-primary: var(--kv-ink);
+	--text-secondary: var(--kv-dim);
+	--text-faint: var(--kv-faint);
+	--text-accent: var(--kv-accent);
+	--text-on-accent: var(--kv-accent-ink);
+	--text-placeholder: var(--kv-placeholder);
+
+	--border-default: var(--kv-faint);
+	--border-accent: rgba(121, 242, 121, 0.55);
+
+	--color-good: var(--kv-accent);
+	--color-warn: var(--kv-orange);
+	--color-bad: var(--kv-danger);
+
+	/* Typography */
+	--font-pixel: 'Press Start 2P', 'Courier New', monospace;
+	--font-term: 'VT323', 'Courier New', monospace;
+
+	--type-display: 22px;
+	--type-title: 13px;
+	--type-heading: 10px;
+	--type-label: 8px;
+	--type-chip: 7px;
+	--tracking-pixel: 0.06em;
+
+	--type-body: 18px;
+	--type-data: 17px;
+	--type-meta: 14px;
+	--type-jumbo: 34px;
+	--leading-term: 1.05;
+
+	/* Spacing */
+	--space-1: 4px;
+	--space-2: 6px;
+	--space-3: 8px;
+	--space-4: 10px;
+	--space-5: 12px;
+	--space-6: 14px;
+	--space-7: 18px;
+	--space-8: 24px;
+	--space-9: 32px;
+	--space-10: 40px;
+	--radius-control: 2px;
+	--radius-card: 3px;
+	--radius-dot: 50%;
+	--border-width: 1px;
+	--screen-gutter: 14px;
+	--tap-target: 44px;
+
+	/* Effects */
+	--glow-accent: 0 0 6px rgba(121, 242, 121, 0.45);
+	--glow-orange: 0 0 6px rgba(255, 177, 61, 0.4);
+	--glow-danger: 0 0 6px rgba(255, 107, 107, 0.4);
+	--scanline: repeating-linear-gradient(
+		to bottom,
+		transparent 0,
+		transparent 2px,
+		rgba(0, 0, 0, 0.22) 2px,
+		rgba(0, 0, 0, 0.22) 3px
+	);
+	--pulse-duration: 1200ms;
+	--blink-duration: 1100ms;
+}
+
+html,
+body {
+	background: var(--kv-bg);
+	color: var(--kv-ink);
+	font-family: var(--font-term);
+}
+
+body {
+	margin: 0;
+	min-height: 100vh;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+.kv-scanlines {
+	position: relative;
+	overflow: hidden;
+}
+
+.kv-scanlines::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	background: var(--scanline);
+	z-index: 50;
+}
+
+@keyframes kv-pulse {
+	0% {
+		opacity: 1;
+	}
+	100% {
+		opacity: 0.3;
+	}
+}
+
+@keyframes kv-blink {
+	0%,
+	49% {
+		opacity: 1;
+	}
+	50%,
+	100% {
+		opacity: 0;
+	}
+}

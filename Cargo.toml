@@ -1,0 +1,84 @@
+[workspace]
+resolver = "2"
+members = ["crates/server", "crates/core", "crates/mobile"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[workspace.dependencies]
+tokio = { version = "1.53", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+axum-extra = { version = "0.12", features = ["cookie", "cookie-private", "cookie-key-expansion", "with-rejection"] }
+tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.7", features = ["fs", "trace", "cors", "timeout"] }
+# Pinned to 0.14, NOT the newest 0.15: as of this writing
+# `tower-sessions-sqlx-store` 0.15.0 depends on `tower-sessions-core =0.14.0`
+# (despite the matching 0.15 version number), which is incompatible with
+# `tower-sessions` 0.15's `tower-sessions-core =0.15.0`. 0.14 is the newest
+# line where both crates agree on the same `tower-sessions-core`. Revisit
+# this pin once `tower-sessions-sqlx-store` catches up.
+tower-sessions = "0.14"
+tower-sessions-sqlx-store = { version = "0.15", features = ["sqlite"] }
+
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
+git2 = { version = "0.21", features = ["vendored-libgit2"] }
+openidconnect = "4.0"
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Phase 2 CRDT collab stack. ONE consistent version: `yrs` 0.26 ships the
+# whole Yjs sync + awareness protocol in-crate at `yrs::sync` (Awareness,
+# Message/SyncMessage, DefaultProtocol, MessageReader), so no separate
+# protocol crate is needed. We deliberately do NOT use:
+#   * `y-sync`   — archived, built against yrs 0.17 (incompatible Doc API);
+#   * `yrs-axum` — built against yrs 0.18 (incompatible Doc API).
+# Both pulled in mismatched yrs copies. `yrs` 0.27 is the latest but fails to
+# compile on rustc 1.94.1 (`if let` guards are still unstable); 0.26.0 is the
+# newest release that compiles here AND carries the in-crate `yrs::sync`
+# module. The wire format is native `y-protocols` (MSG_SYNC=0,
+# MSG_AWARENESS=1, ...), so it is interoperable with the JS `y-websocket`
+# client. The tiny Axum WS transport is hand-rolled in `server::collab`.
+yrs = "0.26"
+
+base64 = "0.22"
+time = { version = "0.3", features = ["formatting"] }
+dashmap = "7.0.0-rc2"
+uuid = { version = "1.24", features = ["v4"] }
+rand = "0.10"
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+tauri = "2.11"
+tempfile = "3.14"
+
+rust-note-core = { path = "crates/core" }
+
+# Panic-safety gate. From the "Rust: Don't Panic" video (No Boilerplate,
+# https://www.youtube.com/watch?v=usRlRCNIOG0), summarized in
+# rust-advice.md: chapter 9 of the Rust book names three ways Rust code
+# crashes - (1) explicit `panic!`, (2) implicit panics like out-of-bounds
+# indexing, (3) unwrapping an `Err`/`None` - and the fix is to have local
+# tooling AND CI throw out any code that can hit them, using Clippy's
+# `restriction`-group lints that flag exactly those three cases. These are
+# `deny` here (not just `warn`) so `cargo clippy` fails hard the moment one
+# is introduced, in an editor or in CI - but this only affects `cargo
+# clippy` runs, never plain `cargo build`/`cargo check`, so it can't slow
+# down or break routine compilation. Test code is exempted via
+# `clippy.toml`'s `allow-*-in-tests` keys (the video's "have your cake and
+# eat it too": prototype freely in `#[cfg(test)]`, never in production
+# code). `pedantic`/`nursery` (the video's "teach you good Rust habits"
+# tier, explicitly not false-positive-free) are deliberately NOT declared
+# here - they run only in the advisory CI workflow, never blocking and
+# never noisy for local `cargo clippy`.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
