@@ -17,3 +17,36 @@
   2026-08-06 while fixing the logout 405: logout was kept POST-only
   specifically so forced-logout via GET isn't possible, but the rest of the
   API deserves the same consideration.
+
+## Deploy (required for the Android app to sync)
+
+- [ ] **Redeploy the production server** (rebuild the `rust-note:latest` image
+  and restart the compose stack on bigboy). The app's device-token auth
+  (`/auth/login?client=app`, bearer on `/api/*`, `?token=` on `/ws/notes/*`),
+  the `device_tokens` migration, and the `http://tauri.localhost` CORS default
+  all shipped 2026-08-06 and only take effect after a redeploy. No compose
+  changes needed (`RUSTNOTE_CORS_ORIGINS` is unset, so the new defaults apply
+  — if it is ever set explicitly it must include `http://tauri.localhost`).
+- [ ] **Check Caddy access logging** for `notes.osmosis.page`: the app's
+  collab websocket carries its device token as `?token=` (browser WebSocket
+  API can't set headers). The rust_note server logs no request URLs, but if
+  Caddy access logs are enabled they will capture raw tokens for
+  `/ws/notes/*` — strip query strings from those log entries or accept the
+  exposure (tokens are revocable via logout and expire after 90 days idle).
+
+## Mobile app follow-ups
+
+- [ ] **Verify on a physical device** (riskiest assumption first): the OIDC
+  redirect chain must end inside the app — Authentik →
+  `notes.osmosis.page/auth/callback` → `http://tauri.localhost/#token=…` has
+  to be intercepted by Tauri's Android protocol handler with the URL fragment
+  preserved. Contingency if it isn't: `tauri-plugin-deep-link` with a custom
+  scheme (`rustnote://auth#token=…`). Also verify: IndexedDB/localStorage
+  survive app restarts; websocket reconnect after backgrounding; airplane-mode
+  edit → reopen → reconnect → CRDT convergence.
+- [ ] **Offline note creation** (deferred from v1): queue
+  `{title, tempId, ydocUpdate}` in localStorage, flush on the next successful
+  `/api/notes` fetch, then join the room and apply the buffered update.
+- [ ] **App webview CSP**: `crates/mobile/tauri.conf.json` has `csp: null`;
+  hardening follow-up is `connect-src https://notes.osmosis.page
+  wss://notes.osmosis.page` so the webview can only talk to the real backend.
