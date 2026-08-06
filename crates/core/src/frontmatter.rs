@@ -136,16 +136,11 @@ fn needs_quoting(value: &str) -> bool {
     }
     let mut chars = value.chars();
     match chars.next() {
-        Some('#') | Some('[') | Some('{') | Some('"') | Some('\'') => return true,
-        Some('-') => {
-            // "- " (hyphen followed by space) is YAML-special (list item).
-            if value.starts_with("- ") {
-                return true;
-            }
-        }
-        _ => {}
+        Some('#' | '[' | '{' | '"' | '\'') => true,
+        // "- " (hyphen followed by space) is YAML-special (list item).
+        Some('-') => value.starts_with("- "),
+        _ => false,
     }
-    false
 }
 
 /// Quote+escape `value` if needed; otherwise return it bare.
