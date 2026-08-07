@@ -1,6 +1,10 @@
 services:
   rustnote:
-    image: rust-note:latest
+    # Published by .github/workflows/docker-publish.yml on every main push.
+    # First-time setup: the GHCR package starts private — make it public once
+    # (GitHub -> Packages -> rust_note -> package settings) or `docker login
+    # ghcr.io` on this host with a read:packages token.
+    image: ghcr.io/kukaraf/rust_note:latest
     container_name: rustnote
     restart: unless-stopped
     # Matches the host `rafa` user (uid/gid 1004 on bigboy) so the container

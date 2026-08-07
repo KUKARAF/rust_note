@@ -11,7 +11,7 @@
 	import ShareDialog from '$lib/share/ShareDialog.svelte';
 	import TrackValueDialog from '$lib/notes/TrackValueDialog.svelte';
 	import { DAILY_NOTE_RE } from '$lib/notes/daily';
-	import { auth } from '$lib/stores/auth';
+	import { auth, flagLoginRequired } from '$lib/stores/auth';
 	import { cacheNoteMeta, hasLocalCopy, markNoteSynced, readNoteMeta } from '$lib/stores/offline';
 	import {
 		createCollabSession,
@@ -95,6 +95,7 @@
 			return 'ok';
 		} catch (err) {
 			if (err instanceof ApiError && err.status === 401) {
+				flagLoginRequired();
 				await goto(resolve('/login'));
 				return 'failed';
 			}

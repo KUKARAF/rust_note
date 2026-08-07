@@ -230,15 +230,27 @@
 		<div class="palette-wrap" role="dialog" aria-modal="true" aria-label="Command palette">
 			<Card>
 				<div class="palette">
-					<Input
-						type="text"
-						placeholder="Search commands and notes…"
-						bind:value={query}
-						bind:el={inputEl}
-					>
-						{#snippet prefix()}&gt;{/snippet}
-						{#snippet suffix()}esc{/snippet}
-					</Input>
+					{#if IS_APP}
+						<!-- No keyboard-shortcut tooltips on touch: no esc suffix. -->
+						<Input
+							type="text"
+							placeholder="Search commands and notes…"
+							bind:value={query}
+							bind:el={inputEl}
+						>
+							{#snippet prefix()}&gt;{/snippet}
+						</Input>
+					{:else}
+						<Input
+							type="text"
+							placeholder="Search commands and notes…"
+							bind:value={query}
+							bind:el={inputEl}
+						>
+							{#snippet prefix()}&gt;{/snippet}
+							{#snippet suffix()}esc{/snippet}
+						</Input>
+					{/if}
 
 					{#if items.length === 0}
 						<p class="palette-empty">Nothing matches "{query}".</p>
@@ -268,7 +280,9 @@
 						</ul>
 					{/if}
 
-					<p class="palette-footer">↑↓ navigate · enter run · esc close</p>
+					{#if !IS_APP}
+						<p class="palette-footer">↑↓ navigate · enter run · esc close</p>
+					{/if}
 				</div>
 			</Card>
 		</div>

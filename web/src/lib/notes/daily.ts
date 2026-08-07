@@ -5,6 +5,7 @@ import { goto } from '$app/navigation';
 import { resolve } from '$app/paths';
 import { apiGet, apiPost, ApiError } from '$lib/api/client';
 import { hasLocalCopy } from '$lib/stores/offline';
+import { flagLoginRequired } from '$lib/stores/auth';
 import { encodeNotePath } from '$lib/notes/path';
 
 /** Matches diary note ids (`diary/2026-08-07`) — drives the track button. */
@@ -67,6 +68,7 @@ export async function openTodayNote(): Promise<string | null> {
 			return "You're offline and today's note isn't cached on this device.";
 		}
 		if (err instanceof ApiError && err.status === 401) {
+			flagLoginRequired();
 			await goto(resolve('/login'));
 			return null;
 		}

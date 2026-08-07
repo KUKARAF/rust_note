@@ -1,36 +1,25 @@
 <script lang="ts">
+	// `/` is a pure dispatcher, not a page: there is nothing to do at the root
+	// except go to the notes (logged in) or the login screen (logged out).
+	// The layout's startup redirect covers the initial load; this effect also
+	// covers in-app navigations back to `/` (e.g. after logout's hard reload).
+	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
+	import { auth } from '$lib/stores/auth';
+
+	$effect(() => {
+		if ($auth.loading) return;
+		void goto(resolve($auth.user ? '/notes' : '/login'), { replaceState: true });
+	});
 </script>
 
-<div class="index-page">
-	<h1 class="index-title">rust_note</h1>
-	<p class="index-desc">
-		Self-hosted, markdown-based notetaking. Go to <a href={resolve('/notes')}>Notes</a>.
-	</p>
-</div>
+<p class="index-redirect">…</p>
 
 <style>
-	.index-page {
-		max-width: 40rem;
-		margin: 0 auto;
-	}
-
-	.index-title {
-		font-family: var(--font-pixel);
-		font-size: var(--type-display);
-		text-transform: uppercase;
-		letter-spacing: var(--tracking-pixel);
-		color: var(--kv-accent);
-		text-shadow: var(--glow-accent);
-	}
-
-	.index-desc {
+	.index-redirect {
+		text-align: center;
 		font-family: var(--font-term);
-		font-size: var(--type-body);
 		color: var(--kv-dim);
-	}
-
-	.index-desc a {
-		color: var(--kv-accent);
+		padding: var(--space-10) 0;
 	}
 </style>

@@ -36,25 +36,39 @@
 		}
 	}
 
-	// Touch gestures, both armed by WHERE the touch starts so they never
-	// fight the note list's / CodeMirror's own scrolling or pull-to-refresh:
+	// Touch gestures, armed by WHERE the touch starts so they never fight the
+	// note list's / CodeMirror's own scrolling or pull-to-refresh:
 	//  * swipe DOWN starting in the top region → command palette;
-	//  * swipe LEFT starting at the right screen edge → today's daily note
-	//    (edge-gating also avoids CodeMirror's horizontal scroll — long lines
-	//    scroll inside the editor, but a touch can't start ON the edge strip).
+	//  * horizontal swipe starting at EITHER screen edge → today's daily note
+	//    (edge-gating also avoids CodeMirror's horizontal scroll — a touch
+	//    can't start ON the edge strips).
+	// Registered manually with { passive: false } — NOT via <svelte:window>
+	// attributes, which Svelte registers passively for touch events. Passive
+	// listeners were why gestures did nothing on Android: the WebView claims
+	// the gesture for scrolling almost immediately, fires touchcancel, and
+	// our thresholds never got a chance. With passive:false we can
+	// preventDefault() once a gesture arms, keeping the event stream alive.
 	// Thresholds: dominant axis > 70px, cross axis < 40px, within 600ms.
 	const SWIPE_TOP_REGION_PX = 140;
 	const SWIPE_EDGE_REGION_PX = 40;
-	let swipeStart: { x: number; y: number; at: number; kind: 'down' | 'left' } | null = null;
+	/** Movement (px) along the armed axis after which we claim the gesture. */
+	const SWIPE_CLAIM_PX = 10;
+	let swipeStart: { x: number; y: number; at: number; kind: 'down' | 'left' | 'right' } | null =
+		null;
 
 	function onTouchStart(event: TouchEvent) {
 		const touch = event.touches.item(0);
 		swipeStart = null;
 		if (event.touches.length !== 1 || touch === null) return;
+		const start = { x: touch.clientX, y: touch.clientY, at: Date.now() };
 		if (touch.clientX >= window.innerWidth - SWIPE_EDGE_REGION_PX) {
-			swipeStart = { x: touch.clientX, y: touch.clientY, at: Date.now(), kind: 'left' };
+			swipeStart = { ...start, kind: 'left' };
+		} else if (touch.clientX <= SWIPE_EDGE_REGION_PX) {
+			// Left edge overlaps Android's back-gesture zone; the right edge is
+			// the primary trigger, this one is best-effort.
+			swipeStart = { ...start, kind: 'right' };
 		} else if (touch.clientY <= SWIPE_TOP_REGION_PX) {
-			swipeStart = { x: touch.clientX, y: touch.clientY, at: Date.now(), kind: 'down' };
+			swipeStart = { ...start, kind: 'down' };
 		}
 	}
 
@@ -68,10 +82,16 @@
 		}
 		const dx = touch.clientX - swipeStart.x;
 		const dy = touch.clientY - swipeStart.y;
+		const alongAxis = swipeStart.kind === 'down' ? dy : swipeStart.kind === 'left' ? -dx : dx;
+		// Once the touch clearly moves along the armed axis, claim the gesture
+		// from the WebView so it doesn't turn into a scroll and cancel us.
+		if (alongAxis > SWIPE_CLAIM_PX && event.cancelable) {
+			event.preventDefault();
+		}
 		if (swipeStart.kind === 'down' && dy > 70 && Math.abs(dx) < 40) {
 			swipeStart = null;
 			paletteOpen = true;
-		} else if (swipeStart.kind === 'left' && -dx > 70 && Math.abs(dy) < 40) {
+		} else if (swipeStart.kind !== 'down' && alongAxis > 70 && Math.abs(dy) < 40) {
 			swipeStart = null;
 			void openTodayNote();
 		}
@@ -80,6 +100,19 @@
 	function onTouchEnd() {
 		swipeStart = null;
 	}
+
+	onMount(() => {
+		window.addEventListener('touchstart', onTouchStart, { passive: true });
+		window.addEventListener('touchmove', onTouchMove, { passive: false });
+		window.addEventListener('touchend', onTouchEnd, { passive: true });
+		window.addEventListener('touchcancel', onTouchEnd, { passive: true });
+		return () => {
+			window.removeEventListener('touchstart', onTouchStart);
+			window.removeEventListener('touchmove', onTouchMove);
+			window.removeEventListener('touchend', onTouchEnd);
+			window.removeEventListener('touchcancel', onTouchEnd);
+		};
+	});
 
 	let mirrorPromptOpen = $state(false);
 	// The prompt check should run exactly once per app start, the first time a
@@ -126,6 +159,23 @@
 			}
 		});
 		void loadSettings();
+
+		// Safe-area fallback (app only): the edge-to-edge plugin is supposed to
+		// inject --safe-area-inset-* on documentElement, but on at least one
+		// tested device it doesn't. If the top inset is still unset/zero after
+		// the webview settles, apply a conservative estimate so content clears
+		// the status bar rather than rendering underneath it.
+		if (IS_APP) {
+			setTimeout(() => {
+				const injected = getComputedStyle(document.documentElement)
+					.getPropertyValue('--safe-area-inset-top')
+					.trim();
+				if (injected === '' || injected === '0px' || injected === '0') {
+					document.documentElement.style.setProperty('--safe-area-inset-top', '32px');
+					document.documentElement.style.setProperty('--safe-area-inset-bottom', '16px');
+				}
+			}, 500);
+		}
 	});
 
 	// Keep the DOM's data-theme in sync with the resolved theme (mirrors the
@@ -177,26 +227,45 @@
 	ontouchend={onTouchEnd}
 />
 
-<div class="app-shell">
-	<nav class="app-nav">
-		<a class="app-name" href={resolve('/notes')}>rust_note<BlinkingCursor /></a>
+<div class="app-shell" class:app-mode={IS_APP}>
+	{#if !IS_APP}
+		<!-- The app build has no top bar at all: navigation, login and logout
+		     live in the command palette (floating button / gestures below). -->
+		<nav class="app-nav">
+			<a class="app-name" href={resolve('/notes')}>rust_note<BlinkingCursor /></a>
 
-		<div class="app-nav-spacer"></div>
+			<div class="app-nav-spacer"></div>
 
-		{#if $auth.loading}
-			<span class="auth-status">…</span>
-		{:else if $auth.user}
-			<span class="auth-status">{$auth.user.display_name ?? $auth.user.email ?? 'Signed in'}</span>
-			<Button variant="outline" size="sm" onclick={logout}>Log out</Button>
-		{:else}
-			<a class="login-link" href={resolve('/login')}>Log in</a>
-		{/if}
-	</nav>
+			{#if $auth.loading}
+				<span class="auth-status">…</span>
+			{:else if $auth.user}
+				<span class="auth-status">{$auth.user.display_name ?? $auth.user.email ?? 'Signed in'}</span
+				>
+				<Button variant="outline" size="sm" onclick={logout}>Log out</Button>
+			{:else}
+				<a class="login-link" href={resolve('/login')}>Log in</a>
+			{/if}
+		</nav>
+	{/if}
 
 	<main class="app-content">
 		{@render children()}
 	</main>
 </div>
+
+{#if IS_APP}
+	<!-- Always-visible palette trigger: with no top bar, the palette is the
+	     app's only navigation surface, and gestures alone are too fragile to
+	     be the sole way in. -->
+	<button
+		type="button"
+		class="palette-fab"
+		aria-label="Open command palette"
+		onclick={() => (paletteOpen = true)}
+	>
+		&gt;_
+	</button>
+{/if}
 
 <MirrorFolderDialog open={mirrorPromptOpen} onclose={() => (mirrorPromptOpen = false)} />
 <CommandPalette open={paletteOpen} onclose={() => (paletteOpen = false)} onlogout={logout} />
@@ -265,5 +334,28 @@
 		padding: var(--screen-gutter);
 		/* Keep content clear of the Android gesture-nav / home-indicator area. */
 		padding-bottom: calc(var(--screen-gutter) + var(--safe-bottom));
+	}
+
+	/* App build: no top bar, so the content itself must clear the status bar. */
+	.app-shell.app-mode .app-content {
+		padding-top: calc(var(--screen-gutter) + var(--safe-top));
+	}
+
+	.palette-fab {
+		position: fixed;
+		right: calc(var(--screen-gutter) + var(--safe-right));
+		bottom: calc(var(--screen-gutter) + var(--safe-bottom) + var(--space-4));
+		z-index: 90;
+		background: var(--surface-card);
+		color: var(--kv-accent);
+		border: 1px solid var(--border-accent);
+		border-radius: var(--radius-card);
+		font-family: var(--font-pixel);
+		font-size: var(--type-label);
+		padding: 12px 14px;
+		min-width: var(--tap-target);
+		min-height: var(--tap-target);
+		cursor: pointer;
+		text-shadow: var(--glow-accent);
 	}
 </style>

@@ -20,6 +20,31 @@ export const auth = writable<AuthState>({
 	loading: true
 });
 
+// "Login required" breadcrumb: pages set this right before their
+// 401 → /login redirect, and the login page consumes it once to show a
+// toast explaining WHY the user landed there. sessionStorage (not local)
+// on purpose — it should never outlive the tab/app session.
+const LOGIN_REASON_KEY = 'rustnote_login_reason';
+
+export function flagLoginRequired(): void {
+	try {
+		sessionStorage.setItem(LOGIN_REASON_KEY, 'auth');
+	} catch {
+		// Storage unavailable: the toast is a nicety, not critical.
+	}
+}
+
+/** Read-and-clear: true when the current login-page visit came from a 401. */
+export function consumeLoginRequired(): boolean {
+	try {
+		const reason = sessionStorage.getItem(LOGIN_REASON_KEY);
+		sessionStorage.removeItem(LOGIN_REASON_KEY);
+		return reason === 'auth';
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Fetches the current session user from the backend and updates the store.
  *

@@ -9,6 +9,8 @@
 	import { resolve } from '$app/paths';
 	import { apiGet, apiPost, ApiError } from '$lib/api/client';
 	import { cacheNotesList, readNotesListCache } from '$lib/stores/offline';
+	import { flagLoginRequired } from '$lib/stores/auth';
+	import { IS_APP } from '$lib/api/deviceToken';
 	import { encodeNotePath } from '$lib/notes/path';
 	import Card from '$lib/design/Card.svelte';
 	import Button from '$lib/design/Button.svelte';
@@ -56,6 +58,7 @@
 			offlineCachedAt = null;
 		} catch (err) {
 			if (err instanceof ApiError && err.status === 401) {
+				flagLoginRequired();
 				await goto(resolve('/login'));
 				return;
 			}
@@ -179,6 +182,7 @@
 			await goto(resolve(`/notes/${encodeNotePath(meta.id)}`));
 		} catch (err) {
 			if (err instanceof ApiError && err.status === 401) {
+				flagLoginRequired();
 				await goto(resolve('/login'));
 				return;
 			}
@@ -197,6 +201,10 @@
 </script>
 
 <svelte:window onkeydown={onKeydown} />
+
+<!-- The '/' suffix is a keyboard-shortcut hint — meaningless on touch, so
+     the app build omits it (passed conditionally to the filter Input). -->
+{#snippet slashHint()}/{/snippet}
 
 <div class="notes-page">
 	<Card class="notes-card">
@@ -218,9 +226,14 @@
 		{/if}
 
 		<div class="filter-row">
-			<Input type="text" placeholder="Filter notes…" bind:value={filter} bind:el={filterInput}>
+			<Input
+				type="text"
+				placeholder="Filter notes…"
+				bind:value={filter}
+				bind:el={filterInput}
+				suffix={IS_APP ? undefined : slashHint}
+			>
 				{#snippet prefix()}&gt;{/snippet}
-				{#snippet suffix()}/{/snippet}
 			</Input>
 		</div>
 
