@@ -10,6 +10,8 @@
 	import Button from '$lib/design/Button.svelte';
 	import ShareDialog from '$lib/share/ShareDialog.svelte';
 	import TrackValueDialog from '$lib/notes/TrackValueDialog.svelte';
+	import ExcalidrawView from '$lib/notes/ExcalidrawView.svelte';
+	import { isExcalidrawNote } from '$lib/notes/excalidraw';
 	import { DAILY_NOTE_RE } from '$lib/notes/daily';
 	import { auth, flagLoginRequired } from '$lib/stores/auth';
 	import { cacheNoteMeta, hasLocalCopy, markNoteSynced, readNoteMeta } from '$lib/stores/offline';
@@ -72,6 +74,14 @@
 	// Metric tracking only applies to daily notes (diary/YYYY-MM-DD).
 	const isDailyNote = $derived(DAILY_NOTE_RE.test(data.path));
 
+	// Excalidraw drawings render as SVG by default, with a raw-text toggle
+	// (the wrapper markdown stays editable — that's the editing story until
+	// a full drawing editor lands). `drawingText` mirrors the live doc for
+	// the renderer since CodeMirror isn't mounted in drawing view.
+	const isDrawing = $derived(isExcalidrawNote(data.path));
+	let drawingAsText = $state(false);
+	let drawingText = $state('');
+
 	// `data.path` is the SvelteKit catch-all param (already URL-decoded). Note
 	// ids from the filesystem can contain '#', '?', '%', '&', spaces, etc., so
 	// re-encode each segment before building a REST URL. (The collab room name
@@ -88,6 +98,9 @@
 			meta = note.meta;
 			restContent = note.content;
 			liveContent = note.content;
+			// Seed the drawing renderer immediately from REST; the collab
+			// observer takes over once the session is live.
+			drawingText = note.content;
 			// Remember the metadata so the note header can still render if this
 			// note is later opened offline (the CRDT copy only has content).
 			cacheNoteMeta(path, note.meta);
@@ -163,6 +176,8 @@
 		connStatus = 'connecting';
 		peers = [];
 		localClientId = -1;
+		drawingAsText = false;
+		drawingText = '';
 
 		const onStatus = (e: { status: ConnStatus }) => {
 			connStatus = e.status;
@@ -219,6 +234,18 @@
 			// Reflect any state already present (e.g. our own local state).
 			synced = sess.provider.synced;
 			refreshPeers(sess);
+
+			// Drawing view: mirror the live doc text for the SVG renderer
+			// (CodeMirror isn't mounted, so onEditorChange never fires). The
+			// observer dies with doc.destroy() in the cleanup below.
+			if (isDrawing) {
+				const s = sess;
+				const updateDrawingText = () => {
+					drawingText = s.ytext.toString();
+				};
+				s.doc.on('update', updateDrawingText);
+				updateDrawingText();
+			}
 
 			// Stash de-registration on the session for cleanup below.
 			(sess as CollabSession & { _off?: () => void })._off = () => {
@@ -341,6 +368,11 @@
 					<Button variant="outline" size="sm" onclick={() => (trackDialogOpen = true)}>Track</Button
 					>
 				{/if}
+				{#if isDrawing}
+					<Button variant="outline" size="sm" onclick={() => (drawingAsText = !drawingAsText)}>
+						{drawingAsText ? 'View drawing' : 'Edit text'}
+					</Button>
+				{/if}
 				<Button variant="outline" size="sm" onclick={() => (shareDialogOpen = true)}>Share</Button>
 			</div>
 		</div>
@@ -357,7 +389,12 @@
 			<TrackValueDialog ytext={session.ytext} onclose={() => (trackDialogOpen = false)} />
 		{/if}
 
-		{#if session && (synced || localReady)}
+		{#if isDrawing && !drawingAsText}
+			<!-- Excalidraw drawing: rendered read-only as SVG (edits still sync
+			     live — the renderer observes the collab doc). Falls back to the
+			     text editor automatically when the drawing can't be parsed. -->
+			<ExcalidrawView content={drawingText} onunrenderable={() => (drawingAsText = true)} />
+		{:else if session && (synced || localReady)}
 			<!-- Live collaborative editor: seeded from the synced CRDT (or the
 			     local IndexedDB copy when opened offline). -->
 			<CodeMirrorEditor

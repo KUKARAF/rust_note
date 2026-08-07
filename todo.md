@@ -63,6 +63,19 @@
   server-side aggregation is needed (client-side TS parser in
   `web/src/lib/notes/metrics.ts` is the only reader today); seed new daily
   notes from a `Templates/Diary` note instead of the hardcoded template.
+- [ ] **Excalidraw editing** (view-only shipped 2026-08-07): full in-app
+  drawing via a lazy React island — `@excalidraw/excalidraw` 0.18+ with
+  react/react-dom dynamically imported only on an explicit Edit action
+  (mount pattern: joysofcode/svelte-excalidraw; set
+  `window.EXCALIDRAW_ASSET_PATH` to self-hosted fonts, no CDN). The hard
+  part is plugin-faithful write-back: regenerate `## Drawing` as
+  `LZString.compressToBase64` chunked at 256 chars with blank-line
+  separators, regenerate `## Text Elements` from text elements' rawText,
+  preserve frontmatter/`%%` sentinels — validate by round-tripping a file
+  through Obsidian. Also: bare `.excalidraw` (non-.md) files aren't listed
+  by the server walk (1 exists in the vault); `@excalidraw/utils` is pinned
+  to `0.1.3-test32` (upstream only publishes test builds — re-evaluate, or
+  switch to exportToSvg from the main package once React lands).
 - [ ] **File-like config entries in the app** (requested 2026-08-07): pin
   `settings`, `notes_sync`, and `select folder` as file-looking entries in the
   app's notes list. Server-side reserved namespace of real notes:

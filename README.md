@@ -135,6 +135,14 @@ calories_eaten:
 ---
 ```
 
+## Excalidraw drawings
+
+Notes ending in `.excalidraw` (the Obsidian excalidraw plugin's
+`*.excalidraw.md` wrappers — both raw `json` and `compressed-json` variants)
+render as read-only SVG in the editor, with an "Edit text" toggle for the
+raw wrapper. Obsidian remains the drawing editor for now; full in-app
+drawing is a planned follow-up (see todo.md).
+
 ## CI
 
 - `ci-required.yml` — blocking: rustfmt, workspace build/test (mobile crate

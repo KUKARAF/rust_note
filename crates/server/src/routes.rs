@@ -21,7 +21,9 @@ use crate::state::AppState;
 /// above any reasonable note yet cheaply rejects a body meant to exhaust
 /// memory/disk with a clean 413 rather than relying on the implicit default
 /// (dos-04).
-const MAX_BODY_BYTES: usize = 1024 * 1024;
+// 4 MiB rather than 1 MiB: Excalidraw drawings with embedded images
+// routinely exceed 1 MiB; 4 MiB still bounds abusive payloads.
+const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 /// Per-request wall-clock timeout for the REST/API surface. Long enough for a
 /// slow git commit under load, short enough to shed a stuck request (dos-03).
@@ -128,7 +130,7 @@ mod tests {
         let (state, _notes_dir, _db_dir) = dev_state().await;
         let app = build(state);
 
-        let huge = "x".repeat(2 * 1024 * 1024); // 2 MiB, over the 1 MiB cap
+        let huge = "x".repeat(5 * 1024 * 1024); // 5 MiB, over the 4 MiB cap
         let body = format!("{{\"id_or_title\":\"big\",\"content\":\"{huge}\"}}");
         let req = Request::builder()
             .method("POST")

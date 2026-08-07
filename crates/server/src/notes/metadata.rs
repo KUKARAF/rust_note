@@ -28,6 +28,17 @@ pub struct NoteMeta {
 /// back to the last path segment of `note_id` (with `-`/`_` turned into
 /// spaces) if no such heading exists.
 pub fn extract_title(note_id: &str, content: &str) -> String {
+    // Excalidraw drawings (Obsidian plugin wrappers, id `*.excalidraw`) have
+    // only internal headings ("# Excalidraw Data", "## Text Elements") that
+    // would make a useless title - always title them from the filename.
+    if let Some(stem) = note_id.strip_suffix(".excalidraw") {
+        return stem
+            .rsplit('/')
+            .next()
+            .unwrap_or(stem)
+            .replace(['-', '_'], " ");
+    }
+
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(heading) = trimmed.strip_prefix('#') {
@@ -143,6 +154,18 @@ mod tests {
         assert_eq!(
             extract_title("projects/my-note", "no heading here"),
             "my note"
+        );
+    }
+
+    #[test]
+    fn extract_title_excalidraw_uses_filename_not_internal_headings() {
+        // The wrapper's internal headings must never become the title.
+        assert_eq!(
+            extract_title(
+                "layer55/High level overview.excalidraw",
+                "---\nexcalidraw-plugin: parsed\n---\n# Excalidraw Data\n## Text Elements\n"
+            ),
+            "High level overview"
         );
     }
 }
