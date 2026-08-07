@@ -10,6 +10,10 @@ web/.svelte-kit/
 .svelte-kit/
 dist/
 
+# Excalidraw fonts — copied from node_modules into static/ by
+# web/scripts/copy-excalidraw-assets.mjs (runs on `npm run prepare`)
+web/static/excalidraw-assets/
+
 # Env / secrets
 .env
 .env.*

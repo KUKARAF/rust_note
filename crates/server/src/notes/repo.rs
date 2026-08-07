@@ -129,6 +129,17 @@ impl NotesRepo {
         }
     }
 
+    /// Convenience wrapper for automated deletions with no specific user
+    /// attribution, using the fixed bot signature.
+    pub async fn delete_and_commit_as_bot(
+        &self,
+        rel_path: &str,
+        message: &str,
+    ) -> anyhow::Result<()> {
+        self.delete_and_commit(rel_path, BOT_NAME, BOT_EMAIL, message)
+            .await
+    }
+
     /// Convenience wrapper for automated writes with no specific user
     /// attribution, using the fixed bot signature.
     pub async fn write_and_commit_as_bot(
@@ -355,16 +366,51 @@ impl NotesRepo {
         Ok(())
     }
 
-    /// List all `.md` files in the working tree (excluding `.git/`),
-    /// relative to the repo root.
+    /// List all note files in the working tree (excluding `.git/`), relative
+    /// to the repo root: `.md` files plus bare `.excalidraw` drawing files.
+    ///
+    /// Legacy Obsidian wrapper files (`*.excalidraw.md`) are deliberately
+    /// SKIPPED (with a warning): their id (`foo.excalidraw`) would collide
+    /// with the bare `foo.excalidraw` sibling under the pure id<->path rule
+    /// (see `fs_store::note_id_to_path`'s bijection notes). The startup
+    /// migration converts them to bare files; anything left over (e.g.
+    /// freshly synced in by Obsidian/Syncthing) converges on the next boot
+    /// or `POST /api/reindex`.
     pub fn list_notes(&self) -> anyhow::Result<Vec<String>> {
-        let mut notes = Vec::new();
-        Self::walk_dir(&self.root, &self.root, &mut notes)?;
+        let mut notes = Self::walk_dir(&self.root, &self.root, &mut |rel| {
+            if rel.ends_with(".excalidraw.md") {
+                tracing::warn!(
+                    path = rel,
+                    "skipping legacy excalidraw wrapper file (pending migration)"
+                );
+                return false;
+            }
+            rel.ends_with(".md") || rel.ends_with(".excalidraw")
+        })?;
         notes.sort();
         Ok(notes)
     }
 
-    fn walk_dir(root: &Path, dir: &Path, out: &mut Vec<String>) -> anyhow::Result<()> {
+    /// List legacy Obsidian excalidraw wrapper files (`*.excalidraw.md`) —
+    /// the migration's work queue. Kept separate from [`Self::list_notes`],
+    /// which skips exactly these.
+    pub fn list_excalidraw_wrappers(&self) -> anyhow::Result<Vec<String>> {
+        let mut found = Self::walk_dir(&self.root, &self.root, &mut |rel| {
+            rel.ends_with(".excalidraw.md")
+        })?;
+        found.sort();
+        Ok(found)
+    }
+
+    /// Recursively collect repo-relative paths (with `/` separators) of all
+    /// regular files under `dir` for which `keep` returns true. `.git/` is
+    /// never descended into.
+    fn walk_dir(
+        root: &Path,
+        dir: &Path,
+        keep: &mut dyn FnMut(&str) -> bool,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut out = Vec::new();
         for entry in std::fs::read_dir(dir).with_context(|| format!("reading dir {dir:?}"))? {
             let entry = entry?;
             let path = entry.path();
@@ -375,17 +421,19 @@ impl NotesRepo {
 
             let file_type = entry.file_type()?;
             if file_type.is_dir() {
-                Self::walk_dir(root, &path, out)?;
-            } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+                out.extend(Self::walk_dir(root, &path, keep)?);
+            } else if file_type.is_file() {
                 let rel = path
                     .strip_prefix(root)
                     .context("stripping repo root prefix")?
                     .to_string_lossy()
                     .replace('\\', "/");
-                out.push(rel);
+                if keep(&rel) {
+                    out.push(rel);
+                }
             }
         }
-        Ok(())
+        Ok(out)
     }
 
     /// Commit history (across all branches from HEAD) touching `rel_path`,

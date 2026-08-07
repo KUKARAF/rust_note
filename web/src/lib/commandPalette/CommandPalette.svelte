@@ -13,6 +13,7 @@
 	import { readNotesListCache } from '$lib/stores/offline';
 	import { encodeNotePath } from '$lib/notes/path';
 	import { openTodayNote } from '$lib/notes/daily';
+	import { EMPTY_SCENE } from '$lib/notes/excalidraw';
 	import { chooseMirrorFolder, mirrorAllSyncedNotes } from '$lib/app/noteMirror';
 	import Card from '$lib/design/Card.svelte';
 	import Chip from '$lib/design/Chip.svelte';
@@ -98,6 +99,27 @@
 				hint: 'open or create the daily note',
 				group: 'action',
 				run: () => openTodayNote().then(() => undefined)
+			},
+			{
+				id: 'new-drawing',
+				label: 'New drawing',
+				hint: 'create an Excalidraw note',
+				group: 'action',
+				run: async () => {
+					// window.prompt rather than a bespoke dialog: the palette closes
+					// before the action runs (see runItem), so there is no surface
+					// left to host an input — and prompt() works fine in the Tauri
+					// webview too.
+					const name = window.prompt('Name for the new drawing:');
+					if (name === null || name.trim() === '') return;
+					// POST returns the created NoteMeta; navigate by its slugified
+					// id rather than the raw name the user typed.
+					const meta = await apiPost<{ id: string }>('/api/notes', {
+						id_or_title: `${name.trim()}.excalidraw`,
+						content: EMPTY_SCENE
+					});
+					await goto(resolve(`/notes/${encodeNotePath(meta.id)}`));
+				}
 			},
 			{
 				id: 'notes',

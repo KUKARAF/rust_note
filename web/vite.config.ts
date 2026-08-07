@@ -10,6 +10,14 @@ export default defineConfig({
 	// in the built bundle and the Android app build ends up identical to the
 	// website build (dead login flow, wrong API origin).
 	envPrefix: ['VITE_', 'PUBLIC_'],
+	// @excalidraw/excalidraw 0.18 ships modules using arbitrary module
+	// namespace identifiers (string-named exports), an es2022 feature — the
+	// default build target rejects them. Raise both the production build and
+	// the dev-server dependency pre-bundling to es2022. (Vite 8's optimizer
+	// is rolldown-based, so the pre-bundle target lives under
+	// `rolldownOptions.transform`, not the old `esbuildOptions`.)
+	build: { target: 'es2022' },
+	optimizeDeps: { rolldownOptions: { transform: { target: 'es2022' } } },
 	plugins: [
 		sveltekit({
 			compilerOptions: {

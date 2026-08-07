@@ -47,6 +47,19 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::init_pool(&config.sqlite_path).await?;
     let notes_repo = NotesRepo::open_or_init(&config.notes_repo_path)?;
 
+    // Convert any legacy Obsidian excalidraw wrapper files to bare drawings
+    // BEFORE anything can list notes or open rooms (no rooms exist yet at
+    // this point, so there is nothing to race). Converges to a no-op.
+    let migration = notes::excalidraw_migration::migrate(&notes_repo).await?;
+    if !migration.is_noop() {
+        tracing::info!(
+            converted = migration.converted,
+            broken_renamed = migration.broken_renamed,
+            skipped_conflicts = migration.skipped_conflicts,
+            "excalidraw wrapper migration ran"
+        );
+    }
+
     if config.dev_mode {
         tracing::warn!(
             "DEV MODE ENABLED: authentication is bypassed, every request is treated as user \

@@ -43,6 +43,11 @@ serde_json = "1.0"
 yrs = "0.26"
 
 base64 = "0.22"
+# LZ-String port: decompresses the Obsidian excalidraw plugin's
+# `compressed-json` wrapper blocks during the one-time drawing migration.
+# The algorithm is frozen upstream (JS lz-string 1.5 likewise), so the
+# crate's age is not a concern.
+lz-str = "0.2"
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting"] }
 dashmap = "7.0.0-rc2"

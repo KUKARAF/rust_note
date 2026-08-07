@@ -30,6 +30,26 @@ export function isExcalidrawNote(noteId: string): boolean {
 }
 
 /**
+ * Seed content for a freshly created drawing: a bare pretty-printed scene in
+ * the same shape the server's migration produces (and `serializeAsJSON`
+ * writes back). Pretty-printed + trailing newline so the on-disk file diffs
+ * cleanly in git, like every other note.
+ */
+export const EMPTY_SCENE =
+	JSON.stringify(
+		{
+			type: 'excalidraw',
+			version: 2,
+			source: 'rust_note',
+			elements: [],
+			appState: {},
+			files: {}
+		},
+		null,
+		2
+	) + '\n';
+
+/**
  * Matches the scene block: `# Drawing` or `## Drawing`, then a ```json or
  * ```compressed-json fence. Tolerates blank lines between heading and fence.
  */

@@ -137,11 +137,19 @@ calories_eaten:
 
 ## Excalidraw drawings
 
-Notes ending in `.excalidraw` (the Obsidian excalidraw plugin's
-`*.excalidraw.md` wrappers — both raw `json` and `compressed-json` variants)
-render as read-only SVG in the editor, with an "Edit text" toggle for the
-raw wrapper. Obsidian remains the drawing editor for now; full in-app
-drawing is a planned follow-up (see todo.md).
+Notes ending in `.excalidraw` are bare, pretty-printed Excalidraw scene JSON,
+editable in-app via the embedded Excalidraw editor ("Edit drawing" button;
+lazy-loaded, so the base app never ships React). "New drawing" is available
+from the command palette. The editor's read-only view (`ExcalidrawView`)
+renders any drawing as SVG for fast opens and as a fallback if the scene
+can't be parsed.
+
+Legacy Obsidian excalidraw-plugin wrapper files (`*.excalidraw.md`, either
+raw `json` or LZ-String `compressed-json`) are converted to bare files by a
+one-time, idempotent server-side migration that runs at boot and from
+`POST /api/reindex` — every conversion is a normal, revertible git commit.
+Obsidian's own **compatibility mode** can still open the resulting bare
+files directly, but the app no longer writes or reads the wrapper format.
 
 ## CI
 

@@ -11,7 +11,7 @@
 	import ShareDialog from '$lib/share/ShareDialog.svelte';
 	import TrackValueDialog from '$lib/notes/TrackValueDialog.svelte';
 	import ExcalidrawView from '$lib/notes/ExcalidrawView.svelte';
-	import { isExcalidrawNote } from '$lib/notes/excalidraw';
+	import { isExcalidrawNote, parseExcalidrawScene } from '$lib/notes/excalidraw';
 	import { DAILY_NOTE_RE } from '$lib/notes/daily';
 	import { auth, flagLoginRequired } from '$lib/stores/auth';
 	import { cacheNoteMeta, hasLocalCopy, markNoteSynced, readNoteMeta } from '$lib/stores/offline';
@@ -81,6 +81,40 @@
 	const isDrawing = $derived(isExcalidrawNote(data.path));
 	let drawingAsText = $state(false);
 	let drawingText = $state('');
+	// Full drawing editor (lazy-loaded React overlay). While it's open the
+	// awareness state carries a `drawingEditing` flag so other clients can
+	// warn that concurrent saves are last-save-wins (see peerEditingDrawing).
+	let drawingEditorOpen = $state(false);
+	let peerEditingDrawing = $state(false);
+
+	// Stale-CRDT repair: collab rooms seed from the server's persisted CRDT
+	// state, which for drawings can predate the server-side migration to bare
+	// scene JSON (disk is authoritative for drawings). When the live doc has
+	// no parseable scene but the REST content (read from disk) does, offer a
+	// one-click whole-doc replace with the disk content.
+	const drawingRepairAvailable = $derived(
+		isDrawing &&
+			synced &&
+			parseExcalidrawScene(drawingText) === null &&
+			parseExcalidrawScene(restContent) !== null
+	);
+
+	function repairDrawing() {
+		const s = session;
+		if (!s) return;
+		const target = restContent;
+		const doc = s.ytext.doc;
+		// Single transaction: peers see one atomic replace, not a delete+insert.
+		const apply = () => {
+			s.ytext.delete(0, s.ytext.length);
+			s.ytext.insert(0, target);
+		};
+		if (doc) {
+			doc.transact(apply);
+		} else {
+			apply();
+		}
+	}
 
 	// `data.path` is the SvelteKit catch-all param (already URL-decoded). Note
 	// ids from the filesystem can contain '#', '?', '%', '&', spaces, etc., so
@@ -145,7 +179,13 @@
 
 	function refreshPeers(sess: CollabSession) {
 		const list: PresencePeer[] = [];
+		let otherDrawing = false;
 		sess.awareness.getStates().forEach((state, clientId) => {
+			// Soft-lock signal: some OTHER client has the drawing editor open.
+			if (clientId !== localClientId) {
+				const s = state as { drawingEditing?: unknown };
+				if (s.drawingEditing) otherDrawing = true;
+			}
 			const user = (state as { user?: { name?: string; color?: string } }).user;
 			if (!user) return;
 			list.push({
@@ -158,6 +198,7 @@
 		// Stable order (self first, then by clientId) so chips don't jump around.
 		list.sort((a, b) => (a.self === b.self ? a.clientId - b.clientId : a.self ? -1 : 1));
 		peers = list;
+		peerEditingDrawing = otherDrawing;
 	}
 
 	// Single lifecycle effect keyed on the note path: load via REST, then join
@@ -178,6 +219,8 @@
 		localClientId = -1;
 		drawingAsText = false;
 		drawingText = '';
+		drawingEditorOpen = false;
+		peerEditingDrawing = false;
 
 		const onStatus = (e: { status: ConnStatus }) => {
 			connStatus = e.status;
@@ -266,6 +309,22 @@
 		};
 	});
 
+	// Broadcast the drawing-editor soft-lock over awareness while the overlay
+	// is open, so other clients on this note can show the last-save-wins
+	// warning. Cleared on close/note-switch; session.destroy() dropping the
+	// whole local awareness state is the backstop for hard teardowns.
+	$effect(() => {
+		const s = session;
+		if (!s) return;
+		if (drawingEditorOpen) {
+			s.awareness.setLocalStateField('drawingEditing', true);
+			return () => {
+				s.awareness.setLocalStateField('drawingEditing', null);
+			};
+		}
+		s.awareness.setLocalStateField('drawingEditing', null);
+	});
+
 	// Guard against navigating away mid-connect, before edits have synced. Once
 	// the room is synced, edits persist automatically (server-side debounced
 	// commit), so no unsaved-changes prompt is needed for the common case.
@@ -296,6 +355,9 @@
 	}
 
 	function onWindowKeydown(event: KeyboardEvent) {
+		// The drawing overlay owns its keys (Ctrl+S saves the scene there); it
+		// stops propagation itself, but never race it for the save shortcut.
+		if (drawingEditorOpen) return;
 		if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
 			event.preventDefault();
 			onSave();
@@ -369,6 +431,14 @@
 					>
 				{/if}
 				{#if isDrawing}
+					<Button
+						variant="outline"
+						size="sm"
+						disabled={!session || !(synced || localReady)}
+						onclick={() => (drawingEditorOpen = true)}
+					>
+						Edit drawing
+					</Button>
 					<Button variant="outline" size="sm" onclick={() => (drawingAsText = !drawingAsText)}>
 						{drawingAsText ? 'View drawing' : 'Edit text'}
 					</Button>
@@ -387,6 +457,28 @@
 
 		{#if trackDialogOpen && session}
 			<TrackValueDialog ytext={session.ytext} onclose={() => (trackDialogOpen = false)} />
+		{/if}
+
+		{#if drawingEditorOpen && session}
+			<!-- Dynamic import keeps the React/Excalidraw stack in a lazy chunk
+			     loaded only when someone actually opens the drawing editor. -->
+			{#await import('$lib/notes/ExcalidrawEditor.svelte') then { default: ExcalidrawEditor }}
+				<ExcalidrawEditor ytext={session.ytext} onclose={() => (drawingEditorOpen = false)} />
+			{/await}
+		{/if}
+
+		{#if isDrawing && peerEditingDrawing}
+			<p class="drawing-banner">Someone else is editing this drawing — last save wins.</p>
+		{/if}
+
+		{#if drawingRepairAvailable}
+			<div class="drawing-banner repair">
+				<span
+					>This drawing's live copy can't be parsed, but the file on disk can — the collab state is
+					stale.</span
+				>
+				<Button variant="outline" size="sm" onclick={repairDrawing}>Repair drawing</Button>
+			</div>
 		{/if}
 
 		{#if isDrawing && !drawingAsText}
@@ -491,6 +583,19 @@
 
 	.filename {
 		color: var(--kv-ink);
+	}
+
+	.drawing-banner {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-5);
+		margin: 0;
+		padding: var(--space-3) var(--space-6);
+		font-family: var(--font-term);
+		font-size: var(--type-meta);
+		color: var(--kv-orange);
+		border-bottom: 1px solid var(--border-default);
 	}
 
 	.preview {

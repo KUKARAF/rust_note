@@ -225,7 +225,12 @@ export function sanitizeRelPath(notePath: string): string {
 		if (clean === '') clean = '_';
 		return clean;
 	});
-	return `${segments.join('/')}.md`;
+	const joined = segments.join('/');
+	// Drawing notes are bare Excalidraw scene JSON — mirroring them as
+	// `foo.excalidraw.md` would mislabel them for other apps (file managers,
+	// Obsidian's excalidraw plugin expect the bare extension). Everything
+	// else keeps the historical `.md` suffix.
+	return joined.endsWith('.excalidraw') ? joined : `${joined}.md`;
 }
 
 // The revoked-grant failure mode hits EVERY debounced write once the user
@@ -259,7 +264,9 @@ async function writeMirrorFileInner(
 	}
 	try {
 		// Creates missing parent directories recursively.
-		const created = await fs.createNewFile(dir.uri, sanitizeRelPath(notePath), 'text/markdown');
+		const relPath = sanitizeRelPath(notePath);
+		const mime = relPath.endsWith('.excalidraw') ? 'application/json' : 'text/markdown';
+		const created = await fs.createNewFile(dir.uri, relPath, mime);
 		await fs.writeTextFile(created, content);
 		files[notePath] = created;
 		writeJson(MIRROR_FILES_KEY, files);

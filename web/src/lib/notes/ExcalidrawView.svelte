@@ -51,6 +51,9 @@
 			if (seq !== renderSeq || container === undefined) return;
 			svg.removeAttribute('width');
 			svg.removeAttribute('height');
+			// The bound div is deliberately empty on the Svelte side; swapping the
+			// exported SVG in manually is the whole rendering mechanism here.
+			// eslint-disable-next-line svelte/no-dom-manipulating
 			container.replaceChildren(svg);
 			status = 'ok';
 		} catch (err) {

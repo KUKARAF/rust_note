@@ -54,13 +54,20 @@ pub(crate) async fn list_notes(
             continue;
         }
 
-        let content = state
-            .notes_repo
-            .read_file(&rel_path)
-            .map_err(AppError::Internal)?
-            .unwrap_or_default();
-        // Use the cheap DB-backed meta builder here: the list must not walk
-        // each note's git history (dos-01/dos-02).
+        // Excalidraw drawings can be multi-MB (embedded images) and their
+        // title is filename-derived anyway (`extract_title`) — never read
+        // their content for the list. Markdown notes are read for the
+        // heading-based title, via the cheap DB-backed meta builder (the
+        // list must not walk each note's git history — dos-01/dos-02).
+        let content = if note_id.ends_with(".excalidraw") {
+            String::new()
+        } else {
+            state
+                .notes_repo
+                .read_file(&rel_path)
+                .map_err(AppError::Internal)?
+                .unwrap_or_default()
+        };
         let meta = build_list_meta(&state, &note_id, &content)
             .await
             .map_err(AppError::Internal)?;
@@ -88,6 +95,21 @@ async fn reindex_notes(
     State(state): State<AppState>,
     RequireAuth(user_id): RequireAuth,
 ) -> AppResult<Json<ReindexResponse>> {
+    // Convert any excalidraw wrappers that arrived since boot (e.g. synced
+    // in by Obsidian/Syncthing) so they become listable bare drawings —
+    // reindex is the "make the vault consistent now" button.
+    let migration = crate::notes::excalidraw_migration::migrate(&state.notes_repo)
+        .await
+        .map_err(AppError::Internal)?;
+    if !migration.is_noop() {
+        tracing::info!(
+            converted = migration.converted,
+            broken_renamed = migration.broken_renamed,
+            skipped_conflicts = migration.skipped_conflicts,
+            "excalidraw wrapper migration ran during reindex"
+        );
+    }
+
     let paths = state.notes_repo.list_notes().map_err(AppError::Internal)?;
 
     let mut scanned = 0usize;
@@ -506,6 +528,67 @@ mod tests {
             .0;
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "my-first-note");
+    }
+
+    #[tokio::test]
+    async fn excalidraw_note_create_read_delete_round_trip() {
+        let (state, notes_dir, _db_dir) = test_state().await;
+
+        let scene = "{\n  \"type\": \"excalidraw\",\n  \"version\": 2,\n  \"elements\": []\n}\n";
+        let meta = create_note(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            WithRejection(
+                Json(CreateNoteRequest {
+                    id_or_title: "sketches/My Drawing.excalidraw".to_string(),
+                    content: Some(scene.to_string()),
+                }),
+                std::marker::PhantomData,
+            ),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        // Slugified stem, suffix preserved; title from filename.
+        assert_eq!(meta.id, "sketches/my-drawing.excalidraw");
+        assert_eq!(meta.title, "my drawing");
+
+        // On disk as a BARE file (no .md), content verbatim.
+        let on_disk = notes_dir.path().join("sketches/my-drawing.excalidraw");
+        assert_eq!(std::fs::read_to_string(&on_disk).unwrap(), scene);
+        assert!(!notes_dir
+            .path()
+            .join("sketches/my-drawing.excalidraw.md")
+            .exists());
+
+        let read = get_note(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            Path("sketches/my-drawing.excalidraw".to_string()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(read.content, scene);
+
+        // Listed (content untouched by the list's skip-read optimization).
+        let listed = list_notes(State(state.clone()), RequireAuth("alice".to_string()))
+            .await
+            .unwrap()
+            .0;
+        assert!(listed
+            .iter()
+            .any(|m| m.id == "sketches/my-drawing.excalidraw"));
+
+        delete_note(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            Path("sketches/my-drawing.excalidraw".to_string()),
+        )
+        .await
+        .unwrap();
+        assert!(!on_disk.exists(), "DELETE must remove the bare file itself");
     }
 
     /// Simulate an external tool (Obsidian/Syncthing/vimwiki) writing a file
