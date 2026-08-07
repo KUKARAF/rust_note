@@ -12,6 +12,7 @@
 	import { auth } from '$lib/stores/auth';
 	import { readNotesListCache } from '$lib/stores/offline';
 	import { encodeNotePath } from '$lib/notes/path';
+	import { openTodayNote } from '$lib/notes/daily';
 	import { chooseMirrorFolder, mirrorAllSyncedNotes } from '$lib/app/noteMirror';
 	import Card from '$lib/design/Card.svelte';
 	import Chip from '$lib/design/Chip.svelte';
@@ -91,6 +92,13 @@
 			];
 		}
 		const items: PaletteItem[] = [
+			{
+				id: 'today',
+				label: "Today's note",
+				hint: 'open or create the daily note',
+				group: 'action',
+				run: () => openTodayNote().then(() => undefined)
+			},
 			{
 				id: 'notes',
 				label: 'Notes',

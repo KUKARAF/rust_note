@@ -116,6 +116,25 @@ bumped **together** to the exact same version.
 
 [`nightly` pre-release]: https://github.com/KUKARAF/rust_note/releases/tag/nightly
 
+## Daily notes
+
+Swipe **left from the right screen edge** (touch/app) or run **"Today's
+note"** from the command palette (Ctrl/Cmd+K) to open today's daily note at
+`diary/YYYY-MM-DD` — created automatically with a `plan: true` frontmatter
+template if it doesn't exist. Daily notes get a **Track** button in the
+editor for logging metrics into the YAML frontmatter, with an optional time
+per entry:
+
+```yaml
+---
+plan: true
+calories_eaten:
+  - value: 300
+    time: "09:30"
+  - value: 500      # untimed entry
+---
+```
+
 ## CI
 
 - `ci-required.yml` — blocking: rustfmt, workspace build/test (mobile crate

@@ -57,6 +57,12 @@
 - [ ] **Keyboard-inset polish**: `tauri-plugin-edge-to-edge` also injects
   `--keyboard-height` / `--keyboard-visible`; use them to keep the editor's
   focused line above the soft keyboard.
+- [ ] **Daily-notes follow-ups** (feature shipped 2026-08-07): metric
+  charts/aggregation view over `diary/*` frontmatter; extend the Rust
+  `frontmatter.rs` parser to read the structured entry-list format when
+  server-side aggregation is needed (client-side TS parser in
+  `web/src/lib/notes/metrics.ts` is the only reader today); seed new daily
+  notes from a `Templates/Diary` note instead of the hardcoded template.
 - [ ] **File-like config entries in the app** (requested 2026-08-07): pin
   `settings`, `notes_sync`, and `select folder` as file-looking entries in the
   app's notes list. Server-side reserved namespace of real notes:

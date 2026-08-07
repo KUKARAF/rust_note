@@ -9,6 +9,8 @@
 	import PulsingDot from '$lib/design/PulsingDot.svelte';
 	import Button from '$lib/design/Button.svelte';
 	import ShareDialog from '$lib/share/ShareDialog.svelte';
+	import TrackValueDialog from '$lib/notes/TrackValueDialog.svelte';
+	import { DAILY_NOTE_RE } from '$lib/notes/daily';
 	import { auth } from '$lib/stores/auth';
 	import { cacheNoteMeta, hasLocalCopy, markNoteSynced, readNoteMeta } from '$lib/stores/offline';
 	import {
@@ -66,6 +68,9 @@
 	let localClientId = -1;
 
 	let shareDialogOpen = $state(false);
+	let trackDialogOpen = $state(false);
+	// Metric tracking only applies to daily notes (diary/YYYY-MM-DD).
+	const isDailyNote = $derived(DAILY_NOTE_RE.test(data.path));
 
 	// `data.path` is the SvelteKit catch-all param (already URL-decoded). Note
 	// ids from the filesystem can contain '#', '?', '%', '&', spaces, etc., so
@@ -331,6 +336,10 @@
 			</h1>
 			<div class="editor-header-actions">
 				<CollabPresence {peers} />
+				{#if isDailyNote && session && (synced || localReady)}
+					<Button variant="outline" size="sm" onclick={() => (trackDialogOpen = true)}>Track</Button
+					>
+				{/if}
 				<Button variant="outline" size="sm" onclick={() => (shareDialogOpen = true)}>Share</Button>
 			</div>
 		</div>
@@ -341,6 +350,10 @@
 				noteTitle={meta.title}
 				onClose={() => (shareDialogOpen = false)}
 			/>
+		{/if}
+
+		{#if trackDialogOpen && session}
+			<TrackValueDialog ytext={session.ytext} onclose={() => (trackDialogOpen = false)} />
 		{/if}
 
 		{#if session && (synced || localReady)}

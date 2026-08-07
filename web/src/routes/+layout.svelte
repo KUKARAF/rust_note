@@ -18,6 +18,7 @@
 	import { shouldPromptForMirror, clearMirrorLocalState } from '$lib/app/noteMirror';
 	import MirrorFolderDialog from '$lib/app/MirrorFolderDialog.svelte';
 	import CommandPalette from '$lib/commandPalette/CommandPalette.svelte';
+	import { openTodayNote } from '$lib/notes/daily';
 	import Button from '$lib/design/Button.svelte';
 	import BlinkingCursor from '$lib/design/BlinkingCursor.svelte';
 	import { get } from 'svelte/store';
@@ -35,20 +36,26 @@
 		}
 	}
 
-	// Swipe-down from the top of the screen opens the palette on touch
-	// devices. Armed only when the touch STARTS in the top region so it never
-	// fights the note list's / CodeMirror's own scrolling or pull-to-refresh
-	// (those gestures start lower on the screen). Thresholds: mostly-vertical
-	// (|dx| < 40px), far enough (dy > 70px), quick enough (< 600ms).
-	const SWIPE_START_REGION_PX = 140;
-	let swipeStart: { x: number; y: number; at: number } | null = null;
+	// Touch gestures, both armed by WHERE the touch starts so they never
+	// fight the note list's / CodeMirror's own scrolling or pull-to-refresh:
+	//  * swipe DOWN starting in the top region → command palette;
+	//  * swipe LEFT starting at the right screen edge → today's daily note
+	//    (edge-gating also avoids CodeMirror's horizontal scroll — long lines
+	//    scroll inside the editor, but a touch can't start ON the edge strip).
+	// Thresholds: dominant axis > 70px, cross axis < 40px, within 600ms.
+	const SWIPE_TOP_REGION_PX = 140;
+	const SWIPE_EDGE_REGION_PX = 40;
+	let swipeStart: { x: number; y: number; at: number; kind: 'down' | 'left' } | null = null;
 
 	function onTouchStart(event: TouchEvent) {
 		const touch = event.touches.item(0);
-		swipeStart =
-			event.touches.length === 1 && touch !== null && touch.clientY <= SWIPE_START_REGION_PX
-				? { x: touch.clientX, y: touch.clientY, at: Date.now() }
-				: null;
+		swipeStart = null;
+		if (event.touches.length !== 1 || touch === null) return;
+		if (touch.clientX >= window.innerWidth - SWIPE_EDGE_REGION_PX) {
+			swipeStart = { x: touch.clientX, y: touch.clientY, at: Date.now(), kind: 'left' };
+		} else if (touch.clientY <= SWIPE_TOP_REGION_PX) {
+			swipeStart = { x: touch.clientX, y: touch.clientY, at: Date.now(), kind: 'down' };
+		}
 	}
 
 	function onTouchMove(event: TouchEvent) {
@@ -59,11 +66,14 @@
 			swipeStart = null;
 			return;
 		}
+		const dx = touch.clientX - swipeStart.x;
 		const dy = touch.clientY - swipeStart.y;
-		const dx = Math.abs(touch.clientX - swipeStart.x);
-		if (dy > 70 && dx < 40) {
+		if (swipeStart.kind === 'down' && dy > 70 && Math.abs(dx) < 40) {
 			swipeStart = null;
 			paletteOpen = true;
+		} else if (swipeStart.kind === 'left' && -dx > 70 && Math.abs(dy) < 40) {
+			swipeStart = null;
+			void openTodayNote();
 		}
 	}
 
