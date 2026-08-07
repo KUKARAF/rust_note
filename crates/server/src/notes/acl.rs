@@ -80,6 +80,29 @@ pub async fn note_exists(db: &SqlitePool, note_id: &str) -> anyhow::Result<bool>
     Ok(fetch_note(db, note_id).await?.is_some())
 }
 
+/// Adopt an orphaned note: register `note_id` to `user_id` ONLY when it has
+/// no DB row yet.
+///
+/// Orphans exist because the notes directory is a real, externally-written
+/// vault (Obsidian/Syncthing/vimwiki write straight into the mounted repo),
+/// while the app's DB only learns about notes created through its own API.
+/// Adoption happens lazily on read paths (list / single GET / reindex): the
+/// first authenticated user to see an orphan becomes its owner. On the
+/// intended single-user deployment that is always the vault's owner; in a
+/// multi-user setup, externally-created files are claimed by whoever lists
+/// first — acceptable because only the deployment operator can write into
+/// the mounted vault from outside the app.
+pub async fn adopt_if_orphaned(
+    db: &SqlitePool,
+    note_id: &str,
+    user_id: &str,
+) -> anyhow::Result<()> {
+    if fetch_note(db, note_id).await?.is_none() {
+        ensure_note_registered(db, note_id, user_id).await?;
+    }
+    Ok(())
+}
+
 /// Register a newly-created note's ownership. A no-op if the note is
 /// already registered (re-saving an existing note must not change its
 /// owner).

@@ -22,6 +22,9 @@ pub fn router() -> Router<AppState> {
             "/api/notes/{*path}",
             get(get_note).put(put_note).delete(delete_note),
         )
+        // Deliberately outside /api/notes/* so it can never collide with a
+        // note id.
+        .route("/api/reindex", axum::routing::post(reindex_notes))
 }
 
 // ---- GET /api/notes ---------------------------------------------------
@@ -35,6 +38,15 @@ pub(crate) async fn list_notes(
     let mut metas = Vec::new();
     for rel_path in paths {
         let note_id = path_to_note_id(&rel_path);
+        if !is_valid_note_id(&note_id) {
+            continue;
+        }
+        // The vault is written externally too (Obsidian/Syncthing straight
+        // into the mounted repo); files the app has never seen get adopted
+        // by the lister so they show up instead of being ACL-filtered out.
+        acl::adopt_if_orphaned(&state.db, &note_id, &user_id)
+            .await
+            .map_err(AppError::Internal)?;
         let readable = acl::can_read(&state.db, &note_id, &user_id)
             .await
             .map_err(AppError::Internal)?;
@@ -56,6 +68,51 @@ pub(crate) async fn list_notes(
     }
 
     Ok(Json(metas))
+}
+
+// ---- POST /api/reindex --------------------------------------------------
+
+#[derive(Debug, Serialize)]
+struct ReindexResponse {
+    /// Files walked in the notes repo (valid ids only).
+    scanned: usize,
+    /// Orphans newly registered to the caller by this run.
+    registered: usize,
+}
+
+/// Walk the notes repo and register every orphaned on-disk `.md` file to the
+/// caller. The list/get paths already adopt lazily; this endpoint exists as
+/// an explicit "import everything now" for freshly-pointed-at vaults and as
+/// a belt-and-suspenders repair tool.
+async fn reindex_notes(
+    State(state): State<AppState>,
+    RequireAuth(user_id): RequireAuth,
+) -> AppResult<Json<ReindexResponse>> {
+    let paths = state.notes_repo.list_notes().map_err(AppError::Internal)?;
+
+    let mut scanned = 0usize;
+    let mut registered = 0usize;
+    for rel_path in paths {
+        let note_id = path_to_note_id(&rel_path);
+        if !is_valid_note_id(&note_id) {
+            continue;
+        }
+        scanned += 1;
+        let existed = acl::note_exists(&state.db, &note_id)
+            .await
+            .map_err(AppError::Internal)?;
+        if !existed {
+            acl::adopt_if_orphaned(&state.db, &note_id, &user_id)
+                .await
+                .map_err(AppError::Internal)?;
+            registered += 1;
+        }
+    }
+
+    Ok(Json(ReindexResponse {
+        scanned,
+        registered,
+    }))
 }
 
 // ---- GET /api/notes/*path ----------------------------------------------
@@ -81,7 +138,21 @@ async fn get_note(
         .await
         .map_err(AppError::Internal)?
     {
-        return Err(AppError::NotFound);
+        // Unregistered — but the file may still exist on disk (the vault is
+        // written externally by Obsidian/Syncthing). Adopt it for the
+        // requester instead of 404ing, so e.g. a daily note created on
+        // another machine opens directly in the app.
+        let on_disk = state
+            .notes_repo
+            .read_file(&rel_path)
+            .map_err(AppError::Internal)?
+            .is_some();
+        if !on_disk {
+            return Err(AppError::NotFound);
+        }
+        acl::adopt_if_orphaned(&state.db, &note_id, &user_id)
+            .await
+            .map_err(AppError::Internal)?;
     }
 
     let readable = acl::can_read(&state.db, &note_id, &user_id)
@@ -435,6 +506,96 @@ mod tests {
             .0;
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "my-first-note");
+    }
+
+    /// Simulate an external tool (Obsidian/Syncthing/vimwiki) writing a file
+    /// straight into the mounted vault, bypassing the app entirely.
+    fn write_external_file(notes_dir: &tempfile::TempDir, rel_path: &str, content: &str) {
+        let path = notes_dir.path().join(rel_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[tokio::test]
+    async fn externally_created_file_is_adopted_by_list() {
+        let (state, notes_dir, _db_dir) = test_state().await;
+        write_external_file(&notes_dir, "diary/2026-08-06.md", "---\nplan: true\n---\n");
+
+        let listed = list_notes(State(state.clone()), RequireAuth("alice".to_string()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "diary/2026-08-06");
+        assert_eq!(listed[0].owner_id, "alice", "lister adopts the orphan");
+
+        // A second user listing later must NOT steal ownership.
+        let _ = list_notes(State(state.clone()), RequireAuth("bob".to_string()))
+            .await
+            .unwrap();
+        let read = get_note(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            Path("diary/2026-08-06".to_string()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(read.meta.owner_id, "alice");
+    }
+
+    #[tokio::test]
+    async fn externally_created_file_is_adopted_by_get() {
+        let (state, notes_dir, _db_dir) = test_state().await;
+        write_external_file(&notes_dir, "external.md", "# From outside\n");
+
+        // Direct GET of an unregistered on-disk file adopts and serves it —
+        // this is what makes opening an Obsidian-created daily note work.
+        let read = get_note(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            Path("external".to_string()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(read.content, "# From outside\n");
+        assert_eq!(read.meta.owner_id, "alice");
+
+        // A truly missing note is still a 404.
+        let err = get_note(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            Path("does-not-exist".to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn reindex_registers_all_orphans() {
+        let (state, notes_dir, _db_dir) = test_state().await;
+        write_external_file(&notes_dir, "one.md", "1");
+        write_external_file(&notes_dir, "sub/two.md", "2");
+        write_external_file(&notes_dir, "sub/deep/three.md", "3");
+
+        let result = reindex_notes(State(state.clone()), RequireAuth("alice".to_string()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(result.scanned, 3);
+        assert_eq!(result.registered, 3);
+
+        // Idempotent: a second run registers nothing new.
+        let again = reindex_notes(State(state.clone()), RequireAuth("bob".to_string()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(again.scanned, 3);
+        assert_eq!(again.registered, 0);
     }
 
     #[tokio::test]

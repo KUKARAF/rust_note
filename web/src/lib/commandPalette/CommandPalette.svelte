@@ -7,7 +7,7 @@
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
-	import { apiGet, API_BASE_URL } from '$lib/api/client';
+	import { apiGet, apiPost, API_BASE_URL } from '$lib/api/client';
 	import { IS_APP } from '$lib/api/deviceToken';
 	import { auth } from '$lib/stores/auth';
 	import { readNotesListCache } from '$lib/stores/offline';
@@ -132,13 +132,24 @@
 				}
 			);
 		}
-		items.push({
-			id: 'logout',
-			label: 'Log out',
-			hint: 'end this session',
-			group: 'action',
-			run: onlogout
-		});
+		items.push(
+			{
+				id: 'reindex',
+				label: 'Reindex notes',
+				hint: 'import files added outside the app',
+				group: 'action',
+				run: async () => {
+					await apiPost('/api/reindex');
+				}
+			},
+			{
+				id: 'logout',
+				label: 'Log out',
+				hint: 'end this session',
+				group: 'action',
+				run: onlogout
+			}
+		);
 		return items;
 	});
 
