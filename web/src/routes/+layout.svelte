@@ -17,10 +17,59 @@
 	} from '$lib/stores/offline';
 	import { shouldPromptForMirror, clearMirrorLocalState } from '$lib/app/noteMirror';
 	import MirrorFolderDialog from '$lib/app/MirrorFolderDialog.svelte';
+	import CommandPalette from '$lib/commandPalette/CommandPalette.svelte';
 	import Button from '$lib/design/Button.svelte';
 	import BlinkingCursor from '$lib/design/BlinkingCursor.svelte';
+	import { get } from 'svelte/store';
 
 	let { children } = $props();
+
+	let paletteOpen = $state(false);
+
+	function onWindowKeydown(event: KeyboardEvent) {
+		// Global palette shortcut. The palette itself stops propagation of its
+		// own keys, so this only ever sees Ctrl/Cmd+K "from outside".
+		if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+			event.preventDefault();
+			paletteOpen = !paletteOpen;
+		}
+	}
+
+	// Swipe-down from the top of the screen opens the palette on touch
+	// devices. Armed only when the touch STARTS in the top region so it never
+	// fights the note list's / CodeMirror's own scrolling or pull-to-refresh
+	// (those gestures start lower on the screen). Thresholds: mostly-vertical
+	// (|dx| < 40px), far enough (dy > 70px), quick enough (< 600ms).
+	const SWIPE_START_REGION_PX = 140;
+	let swipeStart: { x: number; y: number; at: number } | null = null;
+
+	function onTouchStart(event: TouchEvent) {
+		const touch = event.touches.item(0);
+		swipeStart =
+			event.touches.length === 1 && touch !== null && touch.clientY <= SWIPE_START_REGION_PX
+				? { x: touch.clientX, y: touch.clientY, at: Date.now() }
+				: null;
+	}
+
+	function onTouchMove(event: TouchEvent) {
+		if (swipeStart === null || paletteOpen) return;
+		const touch = event.touches.item(0);
+		if (touch === null || event.touches.length !== 1) return;
+		if (Date.now() - swipeStart.at > 600) {
+			swipeStart = null;
+			return;
+		}
+		const dy = touch.clientY - swipeStart.y;
+		const dx = Math.abs(touch.clientX - swipeStart.x);
+		if (dy > 70 && dx < 40) {
+			swipeStart = null;
+			paletteOpen = true;
+		}
+	}
+
+	function onTouchEnd() {
+		swipeStart = null;
+	}
 
 	let mirrorPromptOpen = $state(false);
 	// The prompt check should run exactly once per app start, the first time a
@@ -42,12 +91,30 @@
 		// loadUser() so the very first /auth/me already carries the bearer
 		// header, scrub it from the URL (it's a long-lived credential — keep it
 		// out of the address bar/history), then land on the notes list.
-		if (IS_APP && window.location.hash.startsWith('#token=')) {
+		const capturedToken = IS_APP && window.location.hash.startsWith('#token=');
+		if (capturedToken) {
 			setDeviceToken(window.location.hash.slice('#token='.length));
 			history.replaceState(null, '', window.location.pathname);
 			void goto(resolve('/notes'));
 		}
-		void loadUser();
+		void loadUser().then(() => {
+			// Startup auth redirect (web and app alike). Skipped when a token
+			// was just captured — that path already routed to /notes above.
+			// /login must not bounce to itself, and /shared/* must stay
+			// reachable logged-out (share links are the guest feature). Offline
+			// note: loadUser falls back to the cached user on network failure,
+			// so an offline start with a previous login does NOT end up here
+			// with user === null — only genuinely signed-out states redirect.
+			if (capturedToken) return;
+			const path = window.location.pathname;
+			if (path === '/login' || path === '/shared' || path.startsWith('/shared/')) return;
+			if (get(auth).user === null) {
+				void goto(resolve('/login'));
+			} else if (path === '/') {
+				// Logged in on the landing blurb: go straight to the notes list.
+				void goto(resolve('/notes'));
+			}
+		});
 		void loadSettings();
 	});
 
@@ -93,6 +160,13 @@
 	<link rel="icon" href={favicon} />
 </svelte:head>
 
+<svelte:window
+	onkeydown={onWindowKeydown}
+	ontouchstart={onTouchStart}
+	ontouchmove={onTouchMove}
+	ontouchend={onTouchEnd}
+/>
+
 <div class="app-shell">
 	<nav class="app-nav">
 		<a class="app-name" href={resolve('/notes')}>rust_note<BlinkingCursor /></a>
@@ -115,6 +189,7 @@
 </div>
 
 <MirrorFolderDialog open={mirrorPromptOpen} onclose={() => (mirrorPromptOpen = false)} />
+<CommandPalette open={paletteOpen} onclose={() => (paletteOpen = false)} onlogout={logout} />
 
 <style>
 	.app-shell {

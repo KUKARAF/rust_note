@@ -9,6 +9,7 @@
 	import { resolve } from '$app/paths';
 	import { apiGet, apiPost, ApiError } from '$lib/api/client';
 	import { cacheNotesList, readNotesListCache } from '$lib/stores/offline';
+	import { encodeNotePath } from '$lib/notes/path';
 	import Card from '$lib/design/Card.svelte';
 	import Button from '$lib/design/Button.svelte';
 	import Input from '$lib/design/Input.svelte';
@@ -111,16 +112,6 @@
 		}
 	});
 
-	// Note ids sourced from the filesystem (rather than created via the
-	// app's slugify_note_id) can contain characters like '#', '?', '%', or
-	// '&' that are meaningful to the URL parser. Re-encode each path
-	// segment before building an href/goto target so such ids round-trip
-	// correctly instead of being truncated (at '#'/'?') or otherwise
-	// misinterpreted.
-	function encodeNotePath(path: string): string {
-		return path.split('/').map(encodeURIComponent).join('/');
-	}
-
 	function openSelected() {
 		const note = filtered[selectedIndex];
 		if (note) void goto(resolve(`/notes/${encodeNotePath(note.id)}`));
@@ -139,6 +130,10 @@
 	}
 
 	function onKeydown(event: KeyboardEvent) {
+		// Modifier combos belong to global shortcuts (Ctrl/Cmd+K opens the
+		// command palette in the layout) — never treat them as list navigation.
+		if (event.ctrlKey || event.metaKey || event.altKey) return;
+
 		const target = event.target as HTMLElement | null;
 		const isFilterFocused = target === filterInput;
 

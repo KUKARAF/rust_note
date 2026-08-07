@@ -15,6 +15,9 @@ dist/
 .env.*
 *.env
 
+# Runtime data (dev server: sqlite + git-backed notes repo)
+/data/
+
 # Databases
 *.db
 *.db-shm
