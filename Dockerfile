@@ -4,6 +4,12 @@
 FROM node:22-bookworm-slim AS frontend
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json ./
+# scripts/ must land before `npm ci`: its `prepare` script (which fetches the
+# Excalidraw font assets) runs as part of `npm ci` itself and needs
+# copy-excalidraw-assets.mjs on disk already. Everything else in web/ is
+# copied after, so this layer still caches on package.json/package-lock.json
+# alone for ordinary dependency-only reinstalls.
+COPY web/scripts/ ./scripts/
 RUN npm ci
 COPY web/ ./
 RUN npm run build
