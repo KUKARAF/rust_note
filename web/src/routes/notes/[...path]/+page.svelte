@@ -66,6 +66,14 @@
 	// True when this note was opened from its local copy (REST load failed with
 	// a network error) — drives the "edits saved locally" status chip.
 	let offlineOpen = $state(false);
+	// Sticky: latches true once the editor is first mountable (synced or the
+	// local copy loaded) and STAYS true across later websocket drops. Without
+	// this the editor is gated on the live `synced` flag alone, so every
+	// transient disconnect/reconnect unmounts CodeMirror back to the read-only
+	// preview and remounts it — a visible flash that also loses cursor/scroll.
+	// The CRDT + IndexedDB keep content safe offline, so tearing down the editor
+	// on disconnect is pointless. Reset per-note in the lifecycle effect below.
+	let editorReady = $state(false);
 	let peers = $state<PresencePeer[]>([]);
 	let localClientId = -1;
 
@@ -213,6 +221,7 @@
 		session = null;
 		synced = false;
 		localReady = false;
+		editorReady = false;
 		offlineOpen = false;
 		connStatus = 'connecting';
 		peers = [];
@@ -229,7 +238,10 @@
 			synced = isSynced;
 			// A full sync means y-indexeddb now holds a complete copy of the
 			// doc, so this note becomes openable offline on this device.
-			if (isSynced) markNoteSynced(path);
+			if (isSynced) {
+				editorReady = true; // latch: keep the editor mounted across later drops
+				markNoteSynced(path);
+			}
 		};
 
 		(async () => {
@@ -265,7 +277,10 @@
 				// Mount the editor as soon as the local copy is in, without
 				// waiting for a websocket sync that may never come.
 				void sess.whenLocalLoaded.then(() => {
-					if (!cancelled) localReady = true;
+					if (!cancelled) {
+						localReady = true;
+						editorReady = true; // latch (offline open): stay mounted across drops
+					}
 				});
 			}
 			localClientId = sess.awareness.clientID;
@@ -426,7 +441,7 @@
 			</h1>
 			<div class="editor-header-actions">
 				<CollabPresence {peers} />
-				{#if isDailyNote && session && (synced || localReady)}
+				{#if isDailyNote && session && editorReady}
 					<Button variant="outline" size="sm" onclick={() => (trackDialogOpen = true)}>Track</Button
 					>
 				{/if}
@@ -434,7 +449,7 @@
 					<Button
 						variant="outline"
 						size="sm"
-						disabled={!session || !(synced || localReady)}
+						disabled={!session || !editorReady}
 						onclick={() => (drawingEditorOpen = true)}
 					>
 						Edit drawing
@@ -486,9 +501,11 @@
 			     live — the renderer observes the collab doc). Falls back to the
 			     text editor automatically when the drawing can't be parsed. -->
 			<ExcalidrawView content={drawingText} onunrenderable={() => (drawingAsText = true)} />
-		{:else if session && (synced || localReady)}
+		{:else if session && editorReady}
 			<!-- Live collaborative editor: seeded from the synced CRDT (or the
-			     local IndexedDB copy when opened offline). -->
+			     local IndexedDB copy when opened offline). Gated on the sticky
+			     `editorReady` (not the live `synced`) so a transient websocket
+			     drop doesn't unmount the editor back to the preview and flash. -->
 			<CodeMirrorEditor
 				collab={{
 					ytext: session.ytext,
