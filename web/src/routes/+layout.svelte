@@ -6,16 +6,10 @@
 	import { onMount } from 'svelte';
 	import { auth, loadUser } from '$lib/stores/auth';
 	import { settings, loadSettings } from '$lib/stores/settings';
-	import { apiPost } from '$lib/api/client';
-	import { IS_APP, setDeviceToken, clearDeviceToken } from '$lib/api/deviceToken';
-	import { clearAllLocalNotes } from '$lib/editor/collabProvider';
-	import {
-		clearSyncedRegistry,
-		clearNotesListCache,
-		clearAllNoteMeta,
-		clearCachedUser
-	} from '$lib/stores/offline';
-	import { shouldPromptForMirror, clearMirrorLocalState } from '$lib/app/noteMirror';
+	import { IS_APP, setDeviceToken } from '$lib/api/deviceToken';
+	import { shouldPromptForMirror } from '$lib/app/noteMirror';
+	import { logout } from '$lib/app/logout';
+	import { notesSearchFocuser } from '$lib/commandPalette/items';
 	import MirrorFolderDialog from '$lib/app/MirrorFolderDialog.svelte';
 	import CommandPalette from '$lib/commandPalette/CommandPalette.svelte';
 	import { openTodayNote } from '$lib/notes/daily';
@@ -36,40 +30,37 @@
 		}
 	}
 
-	// Touch gestures, armed by WHERE the touch starts so they never fight the
-	// note list's / CodeMirror's own scrolling or pull-to-refresh:
-	//  * swipe DOWN starting in the top region → command palette;
-	//  * horizontal swipe starting at EITHER screen edge → today's daily note
-	//    (edge-gating also avoids CodeMirror's horizontal scroll — a touch
-	//    can't start ON the edge strips).
+	// Touch gesture: a swipe DOWN starting in the top region opens the command
+	// search. (Horizontal edge-swipes were removed — swiping from a screen edge
+	// collides with Android's system back gesture and was unreliable.)
 	// Registered manually with { passive: false } — NOT via <svelte:window>
 	// attributes, which Svelte registers passively for touch events. Passive
 	// listeners were why gestures did nothing on Android: the WebView claims
-	// the gesture for scrolling almost immediately, fires touchcancel, and
-	// our thresholds never got a chance. With passive:false we can
-	// preventDefault() once a gesture arms, keeping the event stream alive.
-	// Thresholds: dominant axis > 70px, cross axis < 40px, within 600ms.
+	// the gesture for scrolling almost immediately, fires touchcancel, and our
+	// threshold never got a chance. With passive:false we can preventDefault()
+	// once the gesture arms, keeping the event stream alive.
+	// Threshold: down > 70px, |dx| < 40px, within 600ms.
 	const SWIPE_TOP_REGION_PX = 140;
-	const SWIPE_EDGE_REGION_PX = 40;
-	/** Movement (px) along the armed axis after which we claim the gesture. */
+	/** Movement (px) down after which we claim the gesture from the WebView. */
 	const SWIPE_CLAIM_PX = 10;
-	let swipeStart: { x: number; y: number; at: number; kind: 'down' | 'left' | 'right' } | null =
-		null;
+	let swipeStart: { x: number; y: number; at: number } | null = null;
 
 	function onTouchStart(event: TouchEvent) {
 		const touch = event.touches.item(0);
 		swipeStart = null;
 		if (event.touches.length !== 1 || touch === null) return;
-		const start = { x: touch.clientX, y: touch.clientY, at: Date.now() };
-		if (touch.clientX >= window.innerWidth - SWIPE_EDGE_REGION_PX) {
-			swipeStart = { ...start, kind: 'left' };
-		} else if (touch.clientX <= SWIPE_EDGE_REGION_PX) {
-			// Left edge overlaps Android's back-gesture zone; the right edge is
-			// the primary trigger, this one is best-effort.
-			swipeStart = { ...start, kind: 'right' };
-		} else if (touch.clientY <= SWIPE_TOP_REGION_PX) {
-			swipeStart = { ...start, kind: 'down' };
+		if (touch.clientY <= SWIPE_TOP_REGION_PX) {
+			swipeStart = { x: touch.clientX, y: touch.clientY, at: Date.now() };
 		}
+	}
+
+	// Swipe-down focuses whatever the current screen's command search is: the
+	// /notes inline search when it's mounted (it registers a focuser), otherwise
+	// the modal palette — so there's a single search surface per screen.
+	function focusCommandSearch() {
+		const focusInline = get(notesSearchFocuser);
+		if (focusInline) focusInline();
+		else paletteOpen = true;
 	}
 
 	function onTouchMove(event: TouchEvent) {
@@ -82,18 +73,14 @@
 		}
 		const dx = touch.clientX - swipeStart.x;
 		const dy = touch.clientY - swipeStart.y;
-		const alongAxis = swipeStart.kind === 'down' ? dy : swipeStart.kind === 'left' ? -dx : dx;
-		// Once the touch clearly moves along the armed axis, claim the gesture
-		// from the WebView so it doesn't turn into a scroll and cancel us.
-		if (alongAxis > SWIPE_CLAIM_PX && event.cancelable) {
+		// Once the touch clearly moves down, claim the gesture from the WebView
+		// so it doesn't turn into a scroll and cancel us.
+		if (dy > SWIPE_CLAIM_PX && event.cancelable) {
 			event.preventDefault();
 		}
-		if (swipeStart.kind === 'down' && dy > 70 && Math.abs(dx) < 40) {
+		if (dy > 70 && Math.abs(dx) < 40) {
 			swipeStart = null;
-			paletteOpen = true;
-		} else if (swipeStart.kind !== 'down' && alongAxis > 70 && Math.abs(dy) < 40) {
-			swipeStart = null;
-			void openTodayNote();
+			focusCommandSearch();
 		}
 	}
 
@@ -184,36 +171,6 @@
 		document.documentElement.dataset.theme = $settings.theme;
 	});
 
-	async function logout() {
-		// POST via fetch: the route is POST-only on purpose (a GET logout
-		// could be forced cross-site by e.g. an <img> tag or link
-		// prefetching). Set-Cookie on a fetch response clears the session
-		// cookie just as well (and on the app build the POST revokes the
-		// device token server-side); the hard navigation afterwards resets
-		// all client state regardless of whether the request succeeded.
-		try {
-			await apiPost('/auth/logout');
-		} finally {
-			// Wipe everything this device knows, so a shared machine keeps no
-			// readable note content or identity around after logout.
-			clearDeviceToken();
-			try {
-				// Must run before clearSyncedRegistry(): without
-				// indexedDB.databases() the DB names come from that registry.
-				await clearAllLocalNotes();
-			} catch (err) {
-				console.error('Failed to clear local note copies', err);
-			}
-			clearSyncedRegistry();
-			clearNotesListCache();
-			clearAllNoteMeta();
-			clearCachedUser();
-			// Drops the mirror's file map + prompt dismissal, but keeps the
-			// folder grant — the mirrored files are the user's own storage.
-			clearMirrorLocalState();
-			window.location.href = '/';
-		}
-	}
 </script>
 
 <svelte:head>
@@ -256,22 +213,8 @@
 	</main>
 </div>
 
-{#if IS_APP}
-	<!-- Always-visible palette trigger: with no top bar, the palette is the
-	     app's only navigation surface, and gestures alone are too fragile to
-	     be the sole way in. -->
-	<button
-		type="button"
-		class="palette-fab"
-		aria-label="Open command palette"
-		onclick={() => (paletteOpen = true)}
-	>
-		&gt;_
-	</button>
-{/if}
-
 <MirrorFolderDialog open={mirrorPromptOpen} onclose={() => (mirrorPromptOpen = false)} />
-<CommandPalette open={paletteOpen} onclose={() => (paletteOpen = false)} onlogout={logout} />
+<CommandPalette open={paletteOpen} onclose={() => (paletteOpen = false)} />
 
 <style>
 	.app-shell {
@@ -354,23 +297,5 @@
 	/* App build: no top bar, so the content itself must clear the status bar. */
 	.app-shell.app-mode .app-content {
 		padding-top: calc(var(--screen-gutter) + var(--safe-top));
-	}
-
-	.palette-fab {
-		position: fixed;
-		right: calc(var(--screen-gutter) + var(--safe-right));
-		bottom: calc(var(--screen-gutter) + var(--safe-bottom) + var(--space-4));
-		z-index: 90;
-		background: var(--surface-card);
-		color: var(--kv-accent);
-		border: 1px solid var(--border-accent);
-		border-radius: var(--radius-card);
-		font-family: var(--font-pixel);
-		font-size: var(--type-label);
-		padding: 12px 14px;
-		min-width: var(--tap-target);
-		min-height: var(--tap-target);
-		cursor: pointer;
-		text-shadow: var(--glow-accent);
 	}
 </style>

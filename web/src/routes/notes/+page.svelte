@@ -1,29 +1,29 @@
 <script lang="ts">
-	// Note list view. This route is static-shaped (no dynamic params), so —
-	// consistent with adapter-static/ssr=false — data is fetched client-side
-	// on mount rather than via a `+page.ts` load function (the dynamic
-	// `[...path]` route uses `+page.ts` only to pass through the route param,
-	// not to fetch data, since that fetch also needs to happen client-side).
+	// Note list view — doubling as the inline command search: the search box
+	// filters commands AND notes in one unified list (same model as the modal
+	// command palette, via $lib/commandPalette/items). Static-shaped route, so —
+	// consistent with adapter-static/ssr=false — data is fetched client-side on
+	// mount rather than via a `+page.ts` load function.
 	import { onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { apiGet, apiPost, ApiError } from '$lib/api/client';
 	import { cacheNotesList, readNotesListCache } from '$lib/stores/offline';
-	import { flagLoginRequired } from '$lib/stores/auth';
+	import { auth, flagLoginRequired } from '$lib/stores/auth';
 	import { IS_APP } from '$lib/api/deviceToken';
 	import { encodeNotePath } from '$lib/notes/path';
+	import {
+		buildActions,
+		filterItems,
+		notesSearchFocuser,
+		type NoteMeta,
+		type PaletteItem
+	} from '$lib/commandPalette/items';
 	import Card from '$lib/design/Card.svelte';
 	import Button from '$lib/design/Button.svelte';
 	import Input from '$lib/design/Input.svelte';
+	import Chip from '$lib/design/Chip.svelte';
 	import SectionTitle from '$lib/design/SectionTitle.svelte';
-
-	interface NoteMeta {
-		id: string;
-		title: string;
-		owner_id: string;
-		created_at: string;
-		updated_at: string;
-	}
 
 	let notes = $state<NoteMeta[]>([]);
 	let loading = $state(true);
@@ -39,14 +39,12 @@
 	let filterInput: HTMLInputElement | undefined = $state();
 	let listEl: HTMLUListElement | undefined = $state();
 
-	const filtered = $derived(
-		filter.trim() === ''
-			? notes
-			: notes.filter((n) => {
-					const q = filter.toLowerCase();
-					return n.title.toLowerCase().includes(q) || n.id.toLowerCase().includes(q);
-				})
+	// Unified command + note list, from the same builder the modal palette uses.
+	// No note cap here (Infinity) — this is the full vault, not a launcher.
+	const items = $derived<PaletteItem[]>(
+		filterItems(filter, buildActions({ user: $auth.user }), notes, Infinity)
 	);
+	const noteCount = $derived(items.filter((i) => i.group === 'note').length);
 
 	async function loadNotes() {
 		loading = true;
@@ -83,6 +81,10 @@
 	onMount(() => {
 		void loadNotes();
 
+		// Let the layout's swipe-down gesture focus THIS search (there's no
+		// modal palette needed while the inline search is on screen).
+		notesSearchFocuser.set(() => filterInput?.focus());
+
 		// Refresh whenever the app returns to the foreground (tab refocused,
 		// Android webview resumed), so a list opened offline goes live again as
 		// soon as connectivity is back — without a manual reload.
@@ -95,6 +97,7 @@
 		return () => {
 			document.removeEventListener('visibilitychange', onVisibilityChange);
 			window.removeEventListener('focus', onFocus);
+			notesSearchFocuser.set(null);
 		};
 	});
 
@@ -108,21 +111,21 @@
 		return `${Math.round(hours / 24)}d ago`;
 	}
 
-	// Keep the selection in range whenever the filtered list changes.
+	// Keep the selection in range whenever the item list changes.
 	$effect(() => {
-		if (selectedIndex >= filtered.length) {
-			selectedIndex = Math.max(0, filtered.length - 1);
+		if (selectedIndex >= items.length) {
+			selectedIndex = Math.max(0, items.length - 1);
 		}
 	});
 
-	function openSelected() {
-		const note = filtered[selectedIndex];
-		if (note) void goto(resolve(`/notes/${encodeNotePath(note.id)}`));
+	function runSelected() {
+		const item = items[selectedIndex];
+		if (item) void item.run();
 	}
 
 	function moveSelection(delta: number) {
-		if (filtered.length === 0) return;
-		selectedIndex = Math.min(Math.max(selectedIndex + delta, 0), filtered.length - 1);
+		if (items.length === 0) return;
+		selectedIndex = Math.min(Math.max(selectedIndex + delta, 0), items.length - 1);
 		scrollSelectedIntoView();
 	}
 
@@ -145,7 +148,13 @@
 				filterInput?.blur();
 			} else if (event.key === 'Enter') {
 				event.preventDefault();
-				openSelected();
+				runSelected();
+			} else if (event.key === 'ArrowDown') {
+				event.preventDefault();
+				moveSelection(1);
+			} else if (event.key === 'ArrowUp') {
+				event.preventDefault();
+				moveSelection(-1);
 			}
 			return;
 		}
@@ -163,7 +172,7 @@
 				break;
 			case 'Enter':
 				event.preventDefault();
-				openSelected();
+				runSelected();
 				break;
 			case '/':
 				event.preventDefault();
@@ -187,8 +196,6 @@
 				return;
 			}
 			if (err instanceof ApiError && err.status === 0) {
-				// Creation needs the server (it allocates the id and the git
-				// commit) — there's no offline queue for it, by design.
 				createError = "You're offline — creating notes requires a connection.";
 				return;
 			}
@@ -228,7 +235,7 @@
 		<div class="filter-row">
 			<Input
 				type="text"
-				placeholder="Filter notes…"
+				placeholder="Search commands and notes…"
 				bind:value={filter}
 				bind:el={filterInput}
 				suffix={IS_APP ? undefined : slashHint}
@@ -241,35 +248,42 @@
 			<p class="status-line">Loading notes…</p>
 		{:else if loadError}
 			<p class="status-line error">Error loading notes: {loadError}</p>
-		{:else if notes.length === 0}
-			<p class="status-line">No notes yet. Create your first one above.</p>
-		{:else if filtered.length === 0}
-			<p class="status-line">No notes match "{filter}".</p>
+		{:else if items.length === 0}
+			<p class="status-line">Nothing matches "{filter}".</p>
 		{:else}
 			<ul class="notes-list" bind:this={listEl}>
-				{#each filtered as note, index (note.id)}
+				{#each items as item, index (item.id)}
 					<li>
-						<a
-							href={resolve(`/notes/${encodeNotePath(note.id)}`)}
+						<button
+							type="button"
+							class="row"
 							data-selected={index === selectedIndex}
 							class:selected={index === selectedIndex}
 							onmouseenter={() => (selectedIndex = index)}
+							onclick={() => void item.run()}
 						>
-							<span class="note-title" title={note.title}
-								>{note.title.trim() ? note.title : '(untitled)'}</span
+							<span class="row-label" title={item.label}
+								>{item.label.trim() ? item.label : '(untitled)'}</span
 							>
-							<span class="note-id" title={note.id}>{note.id}</span>
-						</a>
+							{#if item.hint}
+								<span class="row-hint" title={item.hint}>{item.hint}</span>
+							{/if}
+							<span class="row-chip">
+								<Chip color={item.group === 'action' ? 'accent' : 'dim'} variant="outline">
+									{item.group}
+								</Chip>
+							</span>
+						</button>
 					</li>
 				{/each}
 			</ul>
 
-			<p class="notes-count">— {filtered.length} note{filtered.length === 1 ? '' : 's'} —</p>
+			<p class="notes-count">— {noteCount} note{noteCount === 1 ? '' : 's'} —</p>
 		{/if}
 
 		<p class="hint">
-			Keyboard: <kbd>j</kbd>/<kbd>k</kbd> or arrows to move, <kbd>Enter</kbd> to open, <kbd>/</kbd> to
-			filter.
+			Keyboard: <kbd>j</kbd>/<kbd>k</kbd> or arrows to move, <kbd>Enter</kbd> to run, <kbd>/</kbd> to
+			search.
 		</p>
 	</Card>
 </div>
@@ -304,31 +318,35 @@
 		border-top: 1px solid var(--border-default);
 	}
 
-	.notes-list a {
+	.row {
 		display: flex;
-		justify-content: space-between;
+		justify-content: flex-start;
 		align-items: baseline;
 		gap: var(--space-6);
+		width: 100%;
 		padding: var(--space-4) var(--space-3);
-		text-decoration: none;
+		text-align: left;
+		background: transparent;
 		color: inherit;
 		min-width: 0;
+		border: none;
 		border-left: 2px solid transparent;
 		border-bottom: 1px solid var(--border-default);
 		font-family: var(--font-term);
 		font-size: var(--type-data);
+		cursor: pointer;
 		transition:
 			background 120ms linear,
 			border-color 120ms linear;
 	}
 
-	.notes-list a:hover,
-	.notes-list a.selected {
+	.row:hover,
+	.row.selected {
 		background: rgba(121, 242, 121, 0.07);
 		border-left: 2px solid var(--kv-accent);
 	}
 
-	.note-title {
+	.row-label {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -337,7 +355,7 @@
 		color: var(--kv-ink);
 	}
 
-	.note-id {
+	.row-hint {
 		color: var(--kv-dim);
 		font-size: var(--type-meta);
 		overflow: hidden;
@@ -345,6 +363,10 @@
 		white-space: nowrap;
 		flex: 0 1 auto;
 		min-width: 0;
+	}
+
+	.row-chip {
+		flex: 0 0 auto;
 	}
 
 	.status-line {
