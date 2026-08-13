@@ -13,17 +13,41 @@ use crate::state::AppState;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserSettings {
     pub theme: String,
+    /// OpenRouter model id used for the natural-language todo query, e.g.
+    /// `openai/gpt-4o-mini`.
+    pub openrouter_model: String,
+    /// OpenRouter API key. Stored here (server-side) and never returned by the
+    /// settings GET — see `SettingsResponse`.
+    pub openrouter_api_key: String,
 }
 
 impl Default for UserSettings {
     fn default() -> Self {
         Self {
             theme: "ration".to_string(),
+            openrouter_model: DEFAULT_OPENROUTER_MODEL.to_string(),
+            openrouter_api_key: String::new(),
         }
     }
 }
 
 pub const KNOWN_THEMES: &[&str] = &["ration"];
+
+/// Default OpenRouter model for new settings. The settings UI offers a few
+/// suggestions; [`is_valid_model_id`] (not an allowlist) governs what's
+/// accepted, since OpenRouter's catalog changes over time.
+pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-4o-mini";
+
+/// Whether `model` is a plausible OpenRouter model id: non-empty, bounded, and
+/// only `vendor/model`-style characters. Deliberately permissive (format, not
+/// membership) so new models aren't rejected.
+pub fn is_valid_model_id(model: &str) -> bool {
+    !model.is_empty()
+        && model.len() <= 100
+        && model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | ':'))
+}
 
 /// The (git-backed) note id under which `user_id`'s settings are stored.
 /// Distinct per user, so two users' settings notes never collide and are
@@ -48,11 +72,12 @@ fn default_note_content() -> String {
             .to_string(),
     };
     fm.set("theme", &UserSettings::default().theme);
+    fm.set("openrouter_model", DEFAULT_OPENROUTER_MODEL);
     fm.render()
 }
 
-/// Parse settings from raw note content, tolerating missing/invalid `theme`
-/// (falls back to the default) rather than erroring.
+/// Parse settings from raw note content, tolerating missing/invalid fields
+/// (each falls back to its default) rather than erroring.
 pub fn parse_settings_tolerant(content: &str) -> UserSettings {
     let fm = Frontmatter::parse(content);
     let theme = fm
@@ -60,7 +85,17 @@ pub fn parse_settings_tolerant(content: &str) -> UserSettings {
         .filter(|t| KNOWN_THEMES.contains(t))
         .unwrap_or("ration")
         .to_string();
-    UserSettings { theme }
+    let openrouter_model = fm
+        .get("openrouter_model")
+        .filter(|m| is_valid_model_id(m))
+        .unwrap_or(DEFAULT_OPENROUTER_MODEL)
+        .to_string();
+    let openrouter_api_key = fm.get("openrouter_api_key").unwrap_or("").to_string();
+    UserSettings {
+        theme,
+        openrouter_model,
+        openrouter_api_key,
+    }
 }
 
 /// Load `user_id`'s settings note, creating it with defaults (registering

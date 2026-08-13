@@ -9,6 +9,7 @@ mod routes;
 mod settings;
 mod share;
 mod state;
+mod todos;
 
 use std::sync::Arc;
 

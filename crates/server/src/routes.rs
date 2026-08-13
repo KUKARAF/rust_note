@@ -16,6 +16,7 @@ use crate::notes;
 use crate::settings;
 use crate::share;
 use crate::state::AppState;
+use crate::todos;
 
 /// Maximum accepted request body size. A note is plain markdown; 1 MiB is far
 /// above any reasonable note yet cheaply rejects a body meant to exhaust
@@ -49,6 +50,8 @@ pub fn build(state: AppState) -> Router {
         .route("/health", get(|| async { "ok" }))
         .merge(auth::oidc::router())
         .merge(notes::routes::router())
+        .merge(todos::routes::router())
+        .merge(todos::query::router())
         .merge(settings::routes::router())
         .merge(share::router())
         .layer(TimeoutLayer::with_status_code(

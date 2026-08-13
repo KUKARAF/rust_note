@@ -3,7 +3,14 @@
 	import SectionTitle from '$lib/design/SectionTitle.svelte';
 	import Chip from '$lib/design/Chip.svelte';
 	import Button from '$lib/design/Button.svelte';
-	import { settings, setTheme, type Theme } from '$lib/stores/settings';
+	import Input from '$lib/design/Input.svelte';
+	import {
+		settings,
+		setTheme,
+		setOpenrouterModel,
+		setOpenrouterKey,
+		type Theme
+	} from '$lib/stores/settings';
 	import { IS_APP } from '$lib/api/deviceToken';
 	import {
 		getMirrorState,
@@ -30,6 +37,71 @@
 			console.error(err);
 		} finally {
 			saving = false;
+		}
+	}
+
+	// --- AI / OpenRouter (powers the /todo natural-language query) -----------
+
+	// Suggestions for the dropdown; any valid `vendor/model` id is accepted by
+	// the backend, so this list isn't exhaustive.
+	const MODEL_SUGGESTIONS = [
+		'openai/gpt-4o-mini',
+		'anthropic/claude-3.5-haiku',
+		'google/gemini-flash-1.5',
+		'meta-llama/llama-3.1-8b-instruct'
+	];
+
+	let apiKeyInput = $state('');
+	let aiSaving = $state(false);
+	let aiError = $state<string | null>(null);
+	let aiSaved = $state<string | null>(null);
+
+	async function chooseModel(model: string) {
+		if (aiSaving || model === $settings.openrouterModel) return;
+		aiSaving = true;
+		aiError = null;
+		aiSaved = null;
+		try {
+			await setOpenrouterModel(model);
+		} catch (err) {
+			aiError = 'Could not save the model.';
+			console.error(err);
+		} finally {
+			aiSaving = false;
+		}
+	}
+
+	async function saveKey() {
+		if (aiSaving || apiKeyInput.trim() === '') return;
+		aiSaving = true;
+		aiError = null;
+		aiSaved = null;
+		try {
+			await setOpenrouterKey(apiKeyInput.trim());
+			apiKeyInput = '';
+			aiSaved = 'API key saved.';
+		} catch (err) {
+			aiError = 'Could not save the API key.';
+			console.error(err);
+		} finally {
+			aiSaving = false;
+		}
+	}
+
+	async function clearKey() {
+		if (aiSaving) return;
+		aiSaving = true;
+		aiError = null;
+		aiSaved = null;
+		try {
+			await setOpenrouterKey('');
+			apiKeyInput = '';
+			aiSaved = 'API key cleared.';
+		} catch (err) {
+			aiError = 'Could not clear the API key.';
+			console.error(err);
+		} finally {
+			aiSaving = false;
 		}
 	}
 
@@ -112,6 +184,54 @@
 		{#if error}<p class="settings-error">{error}</p>{/if}
 	</section>
 
+	<section class="settings-section">
+		<h2 class="settings-section-title">AI · OpenRouter</h2>
+		<p class="ai-help">
+			Powers the natural-language query on the <a href="/todo">Todos</a> board. Set a model and an
+			OpenRouter API key; the key is stored on the server and never shown again.
+		</p>
+
+		<div class="ai-field">
+			<span class="ai-label">Model</span>
+			<div class="model-options">
+				{#each MODEL_SUGGESTIONS as m (m)}
+					<button
+						class="theme-option"
+						onclick={() => chooseModel(m)}
+						disabled={aiSaving}
+						aria-pressed={$settings.openrouterModel === m}
+					>
+						<Chip color="accent" variant={$settings.openrouterModel === m ? 'tint' : 'outline'}>
+							{m}{$settings.openrouterModel === m ? ' ✓' : ''}
+						</Chip>
+					</button>
+				{/each}
+			</div>
+			<p class="ai-current">Active: {$settings.openrouterModel}</p>
+		</div>
+
+		<div class="ai-field">
+			<span class="ai-label">API key</span>
+			<p class="ai-current">
+				{$settings.hasOpenrouterKey ? 'A key is set ✓' : 'No key set'}
+			</p>
+			<div class="ai-key-row">
+				<Input
+					type="password"
+					placeholder={$settings.hasOpenrouterKey ? 'Replace key…' : 'sk-or-…'}
+					bind:value={apiKeyInput}
+				/>
+				<Button variant="primary" size="sm" onclick={saveKey} disabled={aiSaving}>Save key</Button>
+				{#if $settings.hasOpenrouterKey}
+					<Button variant="outline" size="sm" onclick={clearKey} disabled={aiSaving}>Clear</Button>
+				{/if}
+			</div>
+		</div>
+
+		{#if aiSaved}<p class="ai-saved">{aiSaved}</p>{/if}
+		{#if aiError}<p class="settings-error">{aiError}</p>{/if}
+	</section>
+
 	{#if IS_APP}
 		<section class="settings-section">
 			<h2 class="settings-section-title">Notes folder</h2>
@@ -160,9 +280,61 @@
 		margin: 0 0 var(--space-5) 0;
 	}
 
-	.theme-options {
+	.theme-options,
+	.model-options {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-3);
+	}
+
+	.ai-help {
+		font-family: var(--font-term);
+		font-size: var(--type-meta);
+		color: var(--kv-dim);
+		margin: 0 0 var(--space-5) 0;
+	}
+
+	.ai-help a {
+		color: var(--kv-accent);
+	}
+
+	.ai-field {
+		margin-bottom: var(--space-5);
+	}
+
+	.ai-label {
+		display: block;
+		font-family: var(--font-pixel);
+		font-size: var(--type-chip);
+		text-transform: uppercase;
+		letter-spacing: var(--tracking-pixel);
+		color: var(--kv-dim);
+		margin-bottom: var(--space-3);
+	}
+
+	.ai-current {
+		font-family: var(--font-term);
+		font-size: var(--type-meta);
+		color: var(--kv-dim);
+		margin: var(--space-3) 0 0 0;
+	}
+
+	.ai-key-row {
 		display: flex;
 		gap: var(--space-3);
+		align-items: center;
+		margin-top: var(--space-3);
+	}
+
+	.ai-key-row :global(.kv-input-wrap) {
+		flex: 1 1 auto;
+	}
+
+	.ai-saved {
+		font-family: var(--font-term);
+		font-size: var(--type-meta);
+		color: var(--kv-accent);
+		margin-top: var(--space-4);
 	}
 
 	.theme-option {

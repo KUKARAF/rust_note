@@ -53,6 +53,10 @@ pub struct Config {
     /// origin/container behind a reverse proxy with no CORS needed. Unset in
     /// local dev, where the Vite dev server serves the frontend separately.
     pub static_dir: Option<String>,
+    /// Deployment-wide OpenRouter API key (`RUSTNOTE_OPENROUTER_API_KEY`),
+    /// used as a fallback for the natural-language todo query when a user
+    /// hasn't set their own key in Settings. `None` when unset/empty.
+    pub openrouter_api_key: Option<String>,
 }
 
 /// User id used for every request when [`Config::dev_mode`] is enabled.
@@ -152,6 +156,9 @@ impl Config {
                     .collect()
                 }),
             static_dir: std::env::var("RUSTNOTE_STATIC_DIR").ok(),
+            openrouter_api_key: std::env::var("RUSTNOTE_OPENROUTER_API_KEY")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 

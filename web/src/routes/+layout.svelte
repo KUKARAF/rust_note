@@ -234,6 +234,9 @@
 		<nav class="app-nav">
 			<a class="app-name" href={resolve('/notes')}>rust_note<BlinkingCursor /></a>
 
+			<Button variant="outline" size="sm" onclick={() => openTodayNote()}>Today</Button>
+			<a class="nav-link" href={resolve('/todo')}>Todos</a>
+
 			<div class="app-nav-spacer"></div>
 
 			{#if $auth.loading}
@@ -327,6 +330,18 @@
 
 	.login-link:hover {
 		opacity: 0.82;
+	}
+
+	.nav-link {
+		font-family: var(--font-term);
+		font-size: var(--type-data);
+		color: var(--kv-dim);
+		text-decoration: none;
+		transition: color 120ms linear;
+	}
+
+	.nav-link:hover {
+		color: var(--kv-accent);
 	}
 
 	.app-content {

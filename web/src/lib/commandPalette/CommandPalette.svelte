@@ -101,6 +101,13 @@
 				run: () => openTodayNote().then(() => undefined)
 			},
 			{
+				id: 'todos',
+				label: 'Todos',
+				hint: 'board of tasks across daily notes',
+				group: 'action',
+				run: () => goto(resolve('/todo'))
+			},
+			{
 				id: 'new-drawing',
 				label: 'New drawing',
 				hint: 'create an Excalidraw note',

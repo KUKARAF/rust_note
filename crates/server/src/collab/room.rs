@@ -240,8 +240,9 @@ impl RoomRegistry {
         self.rooms.len()
     }
 
-    /// Fetch an existing room without creating one (used in tests).
-    #[cfg(test)]
+    /// Fetch an existing room without creating one. Used to read a note's
+    /// live in-memory text (`Room::snapshot_text`) when one is joined, so
+    /// readers see edits that haven't been flushed to disk yet.
     pub fn get(&self, note_id: &str) -> Option<Arc<Room>> {
         self.rooms.get(note_id).map(|r| r.value().clone())
     }

@@ -24,6 +24,11 @@ tower-sessions-sqlx-store = { version = "0.15", features = ["sqlite"] }
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
 git2 = { version = "0.21", features = ["vendored-libgit2"] }
 openidconnect = "4.0"
+# Outbound HTTP for the OpenRouter LLM call (natural-language todo query).
+# `reqwest` is already in the tree transitively via `openidconnect`; declaring
+# it here with `json` + `rustls-tls` pins the features we use. `default-features
+# = false` avoids pulling native-tls.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

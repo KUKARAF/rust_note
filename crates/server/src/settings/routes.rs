@@ -6,7 +6,7 @@ use axum::{Json, Router};
 use axum_extra::extract::WithRejection;
 use serde::{Deserialize, Serialize};
 
-use super::store::{self, KNOWN_THEMES};
+use super::store::{self, is_valid_model_id, UserSettings, KNOWN_THEMES};
 use crate::auth::session::RequireAuth;
 use crate::error::{AppError, AppResult};
 use crate::notes::{acl, fs_store::note_id_to_path};
@@ -19,11 +19,29 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Serialize)]
 struct SettingsResponse {
     theme: String,
+    openrouter_model: String,
+    /// Whether an OpenRouter API key is stored. The key itself is NEVER
+    /// returned — the client only needs to know if one is set.
+    has_openrouter_key: bool,
 }
 
-#[derive(Debug, Deserialize)]
+impl SettingsResponse {
+    fn from_settings(s: &UserSettings) -> Self {
+        Self {
+            theme: s.theme.clone(),
+            openrouter_model: s.openrouter_model.clone(),
+            has_openrouter_key: !s.openrouter_api_key.is_empty(),
+        }
+    }
+}
+
+/// All fields optional so the client can update just one (e.g. only the theme,
+/// or only the OpenRouter key) without echoing the others back.
+#[derive(Debug, Default, Deserialize)]
 struct PutSettingsRequest {
-    theme: String,
+    theme: Option<String>,
+    openrouter_model: Option<String>,
+    openrouter_api_key: Option<String>,
 }
 
 async fn get_settings(
@@ -34,9 +52,7 @@ async fn get_settings(
     let _guard = state.note_locks.lock(&note_id).await;
 
     let settings = store::load_or_bootstrap(&state, &user_id).await?;
-    Ok(Json(SettingsResponse {
-        theme: settings.theme,
-    }))
+    Ok(Json(SettingsResponse::from_settings(&settings)))
 }
 
 async fn put_settings(
@@ -44,8 +60,15 @@ async fn put_settings(
     RequireAuth(user_id): RequireAuth,
     WithRejection(Json(body), _): WithRejection<Json<PutSettingsRequest>, AppError>,
 ) -> AppResult<Json<SettingsResponse>> {
-    if !KNOWN_THEMES.contains(&body.theme.as_str()) {
-        return Err(AppError::BadRequest("unknown theme".to_string()));
+    if let Some(theme) = &body.theme {
+        if !KNOWN_THEMES.contains(&theme.as_str()) {
+            return Err(AppError::BadRequest("unknown theme".to_string()));
+        }
+    }
+    if let Some(model) = &body.openrouter_model {
+        if !is_valid_model_id(model) {
+            return Err(AppError::BadRequest("invalid OpenRouter model id".to_string()));
+        }
     }
 
     let note_id = store::settings_note_id(&user_id);
@@ -65,7 +88,16 @@ async fn put_settings(
         })?;
 
     let mut fm = rust_note_core::frontmatter::Frontmatter::parse(&raw);
-    fm.set("theme", &body.theme);
+    if let Some(theme) = &body.theme {
+        fm.set("theme", theme);
+    }
+    if let Some(model) = &body.openrouter_model {
+        fm.set("openrouter_model", model);
+    }
+    // A key sent (even empty, to clear it) is written; omitted leaves it as-is.
+    if let Some(key) = &body.openrouter_api_key {
+        fm.set("openrouter_api_key", key);
+    }
     let new_content = fm.render();
 
     let (author_name, author_email) = crate::db_users::commit_author(&state.db, &user_id)
@@ -88,7 +120,9 @@ async fn put_settings(
         .await
         .map_err(AppError::Internal)?;
 
-    Ok(Json(SettingsResponse { theme: body.theme }))
+    // Re-read so the response reflects the persisted state (incl. has-key).
+    let updated = store::parse_settings_tolerant(&new_content);
+    Ok(Json(SettingsResponse::from_settings(&updated)))
 }
 
 #[cfg(test)]
@@ -174,7 +208,8 @@ mod tests {
             RequireAuth("alice".to_string()),
             WithRejection(
                 Json(PutSettingsRequest {
-                    theme: "ration".to_string(),
+                    theme: Some("ration".to_string()),
+                    ..Default::default()
                 }),
                 std::marker::PhantomData,
             ),
@@ -208,7 +243,8 @@ mod tests {
             RequireAuth("alice".to_string()),
             WithRejection(
                 Json(PutSettingsRequest {
-                    theme: "nonexistent-theme".to_string(),
+                    theme: Some("nonexistent-theme".to_string()),
+                    ..Default::default()
                 }),
                 std::marker::PhantomData,
             ),
@@ -222,6 +258,56 @@ mod tests {
             commits_before, commits_after,
             "a rejected PUT must not create a new commit"
         );
+    }
+
+    #[tokio::test]
+    async fn openrouter_key_is_write_only_and_model_round_trips() {
+        let (state, _notes_dir, _db_dir) = test_state().await;
+        let rel_path = note_id_to_path(&store::settings_note_id("alice"));
+
+        let resp = put_settings(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            WithRejection(
+                Json(PutSettingsRequest {
+                    openrouter_model: Some("anthropic/claude-3.5-haiku".to_string()),
+                    openrouter_api_key: Some("sk-secret-123".to_string()),
+                    ..Default::default()
+                }),
+                std::marker::PhantomData,
+            ),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        // The GET-shaped response exposes the model and a boolean, never the key.
+        assert_eq!(resp.openrouter_model, "anthropic/claude-3.5-haiku");
+        assert!(resp.has_openrouter_key);
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("sk-secret-123"), "raw key must never be serialized");
+
+        // The key IS persisted server-side (readable by the query endpoint).
+        let content = state.notes_repo.read_file(&rel_path).unwrap().unwrap();
+        let parsed = store::parse_settings_tolerant(&content);
+        assert_eq!(parsed.openrouter_api_key, "sk-secret-123");
+
+        // A later PUT that omits the key leaves it intact.
+        let resp2 = put_settings(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            WithRejection(
+                Json(PutSettingsRequest {
+                    theme: Some("ration".to_string()),
+                    ..Default::default()
+                }),
+                std::marker::PhantomData,
+            ),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(resp2.has_openrouter_key, "omitted key must not be cleared");
     }
 
     #[tokio::test]

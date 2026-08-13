@@ -4043,6 +4043,7 @@ dependencies = [
  "lz-str",
  "openidconnect",
  "rand 0.10.2",
+ "reqwest 0.12.28",
  "rust-note-core",
  "serde",
  "serde_json",
