@@ -1,13 +1,15 @@
 name: Android Nightly APK
 
-# Builds a DEBUG APK on every push to main that touches APK-relevant code and
+# Builds an APK on every push to main that touches APK-relevant code and
 # publishes it as a rolling `nightly` pre-release (tag + release are recreated
 # each run so the tag always points at the built commit).
 #
-# The debug APK is signed automatically by the Android Gradle Plugin with an
-# auto-generated debug keystore, so it installs on any device and needs no
-# repo secrets. Not for production distribution - tags produce the real
-# signed release (see android-release.yml).
+# Signed with the SAME release keystore as tagged releases (android-release.yml),
+# using the same repo secrets. This is deliberate: the Android Gradle Plugin's
+# auto-generated debug keystore is regenerated randomly on every CI run, so
+# debug-signed nightlies had a different certificate each build and Android
+# refused to update one over another ("App not installed"). One stable signing
+# identity across all nightlies AND tagged releases means updates always apply.
 #
 # See android-release.yml for why `tauri android init` runs in CI instead of
 # committing crates/mobile/gen/.
@@ -87,23 +89,48 @@ jobs:
         working-directory: crates/mobile
         run: cargo tauri android init --skip-targets-install
 
-      - name: Build debug APK (arm64)
+      - name: Build unsigned release APK (arm64)
         working-directory: crates/mobile
-        run: cargo tauri android build --apk --debug --target aarch64
+        run: cargo tauri android build --apk --target aarch64
+
+      - name: Sign APK (zipalign + apksigner)
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Sign with the release keystore so every nightly shares one signing
+          # identity (see the header comment). Mirrors android-release.yml.
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n1)"
+          APK_DIR=crates/mobile/gen/android/app/build/outputs/apk/universal/release
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          # zipalign must run before apksigner (apksigner preserves alignment)
+          "$BT/zipalign" -f -p 4 \
+            "$APK_DIR/app-universal-release-unsigned.apk" \
+            "$RUNNER_TEMP/app-aligned.apk"
+          "$BT/apksigner" sign \
+            --ks "$RUNNER_TEMP/release.keystore" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+            --key-pass "pass:$ANDROID_KEY_PASSWORD" \
+            --out "rust-note-nightly-${GITHUB_SHA::7}.apk" \
+            "$RUNNER_TEMP/app-aligned.apk"
+          "$BT/apksigner" verify --print-certs "rust-note-nightly-${GITHUB_SHA::7}.apk"
+          rm -f "$RUNNER_TEMP/release.keystore"
 
       - name: Publish rolling nightly pre-release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          APK=crates/mobile/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
-          cp "$APK" "rust-note-nightly-${GITHUB_SHA::7}.apk"
           # Delete + recreate so the `nightly` tag moves to the current
           # commit; uploading over the old release would leave the tag (and
           # the release's source snapshot) pointing at a stale commit.
           gh release delete nightly --cleanup-tag --yes || true
           gh release create nightly \
             --prerelease \
-            --title "Nightly debug APK (${GITHUB_SHA::7})" \
-            --notes "Automated debug build of ${GITHUB_SHA} from main. Debug-signed; not for production." \
+            --title "Nightly APK (${GITHUB_SHA::7})" \
+            --notes "Automated build of ${GITHUB_SHA} from main. Signed with the release key." \
             "rust-note-nightly-${GITHUB_SHA::7}.apk"
