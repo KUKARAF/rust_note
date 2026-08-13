@@ -45,10 +45,10 @@
 	// Suggestions for the dropdown; any valid `vendor/model` id is accepted by
 	// the backend, so this list isn't exhaustive.
 	const MODEL_SUGGESTIONS = [
+		'minimax/minimax-m3',
 		'openai/gpt-4o-mini',
 		'anthropic/claude-3.5-haiku',
-		'google/gemini-flash-1.5',
-		'meta-llama/llama-3.1-8b-instruct'
+		'google/gemini-flash-1.5'
 	];
 
 	let apiKeyInput = $state('');

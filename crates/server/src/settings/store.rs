@@ -36,7 +36,7 @@ pub const KNOWN_THEMES: &[&str] = &["ration"];
 /// Default OpenRouter model for new settings. The settings UI offers a few
 /// suggestions; [`is_valid_model_id`] (not an allowlist) governs what's
 /// accepted, since OpenRouter's catalog changes over time.
-pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-4o-mini";
+pub const DEFAULT_OPENROUTER_MODEL: &str = "minimax/minimax-m3";
 
 /// Whether `model` is a plausible OpenRouter model id: non-empty, bounded, and
 /// only `vendor/model`-style characters. Deliberately permissive (format, not

@@ -21,7 +21,7 @@ interface SettingsResponse {
 }
 
 const STORAGE_KEY = 'rust-note-theme';
-const DEFAULT_MODEL = 'openai/gpt-4o-mini';
+const DEFAULT_MODEL = 'minimax/minimax-m3';
 
 function readCachedTheme(): Theme {
 	try {
