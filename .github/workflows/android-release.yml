@@ -99,6 +99,14 @@ jobs:
         working-directory: crates/mobile
         run: cargo tauri android init --skip-targets-install
 
+      - name: Apply the committed launcher icons
+        working-directory: crates/mobile
+        run: |
+          set -euo pipefail
+          # `tauri android init` regenerates gen/ with DEFAULT Tauri launcher
+          # icons; overlay our committed icons so the APK shows the real app icon.
+          cp -r icons/android/. gen/android/app/src/main/res/
+
       - name: Build unsigned release APK (arm64 + arm)
         working-directory: crates/mobile
         run: cargo tauri android build --apk --target aarch64 --target armv7
