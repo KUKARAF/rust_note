@@ -14,6 +14,9 @@ path = "src/lib.rs"
 [dependencies]
 rust-note-core = { workspace = true }
 tauri = { workspace = true }
+# Required in scope by `tauri::generate_context!` codegen once a `plugins`
+# config section exists (the deep-link config is deserialized via serde_json).
+serde_json = { workspace = true }
 
 # Injects the Android system-bar insets as CSS variables
 # (--safe-area-inset-*) on the webview's documentElement — the Android
