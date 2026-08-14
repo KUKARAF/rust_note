@@ -5,13 +5,14 @@
 import { writable } from 'svelte/store';
 import { goto } from '$app/navigation';
 import { resolve } from '$app/paths';
-import { apiPost, API_BASE_URL } from '$lib/api/client';
+import { apiPost } from '$lib/api/client';
 import { IS_APP } from '$lib/api/deviceToken';
 import { encodeNotePath } from '$lib/notes/path';
 import { openTodayNote } from '$lib/notes/daily';
 import { EMPTY_SCENE } from '$lib/notes/excalidraw';
 import { chooseMirrorFolder, mirrorAllSyncedNotes } from '$lib/app/noteMirror';
 import { logout } from '$lib/app/logout';
+import { startLogin } from '$lib/app/login';
 import type { AuthUser } from '$lib/stores/auth';
 
 export interface NoteMeta {
@@ -41,13 +42,6 @@ export const MAX_NOTE_RESULTS = 12;
  */
 export const notesSearchFocuser = writable<null | (() => void)>(null);
 
-function login() {
-	// Same top-level navigation the login page uses: the OIDC flow must run as
-	// page navigations (and `?client=app` routes the callback back into the app
-	// with a device token).
-	window.location.href = `${API_BASE_URL}/auth/login${IS_APP ? '?client=app' : ''}`;
-}
-
 /**
  * Context-aware command list, recomputed from the auth state so it can never
  * offer "Log in" to a logged-in user or vice versa.
@@ -55,7 +49,13 @@ function login() {
 export function buildActions(ctx: { user: AuthUser | null }): PaletteItem[] {
 	if (ctx.user === null) {
 		return [
-			{ id: 'login', label: 'Log in', hint: 'open the sign-in flow', group: 'action', run: login }
+			{
+				id: 'login',
+				label: 'Log in',
+				hint: 'open the sign-in flow',
+				group: 'action',
+				run: () => startLogin()
+			}
 		];
 	}
 	const items: PaletteItem[] = [

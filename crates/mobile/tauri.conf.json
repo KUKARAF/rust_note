@@ -20,5 +20,15 @@
     "security": {
       "csp": null
     }
+  },
+  "plugins": {
+    "deep-link": {
+      "mobile": [
+        {
+          "scheme": ["dev.rustnote.app"],
+          "appLink": false
+        }
+      ]
+    }
   }
 }

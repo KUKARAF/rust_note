@@ -14,6 +14,13 @@ pub fn run() {
         // SAF folder access for the notes-folder mirror; permissions granted
         // via capabilities/default.json ("android-fs:default").
         .plugin(tauri_plugin_android_fs::init())
+        // OIDC login: open the OS browser (opener) and receive the device token
+        // back via the `dev.rustnote.app://auth` deep link. The frontend reads
+        // the launch/opened URL through the plugin's JS API (getCurrent /
+        // onOpenUrl); no Rust-side handler needed. Permissions:
+        // "deep-link:default" / "opener:default" in capabilities/default.json.
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_opener::init())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

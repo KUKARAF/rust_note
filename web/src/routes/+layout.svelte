@@ -6,9 +6,10 @@
 	import { onMount } from 'svelte';
 	import { auth, loadUser } from '$lib/stores/auth';
 	import { settings, loadSettings } from '$lib/stores/settings';
-	import { IS_APP, setDeviceToken } from '$lib/api/deviceToken';
+	import { IS_APP } from '$lib/api/deviceToken';
 	import { shouldPromptForMirror } from '$lib/app/noteMirror';
 	import { logout } from '$lib/app/logout';
+	import { initDeepLinkAuth } from '$lib/app/deepLinkAuth';
 	import { notesSearchFocuser } from '$lib/commandPalette/items';
 	import MirrorFolderDialog from '$lib/app/MirrorFolderDialog.svelte';
 	import CommandPalette from '$lib/commandPalette/CommandPalette.svelte';
@@ -115,27 +116,27 @@
 		});
 	});
 
+	let unlistenDeepLink: (() => void) | undefined;
+
 	onMount(() => {
-		// App build: the backend finishes the OIDC flow by redirecting to
-		// `http://tauri.localhost/#token=<device token>`. Capture it BEFORE
-		// loadUser() so the very first /auth/me already carries the bearer
-		// header, scrub it from the URL (it's a long-lived credential — keep it
-		// out of the address bar/history), then land on the notes list.
-		const capturedToken = IS_APP && window.location.hash.startsWith('#token=');
-		if (capturedToken) {
-			setDeviceToken(window.location.hash.slice('#token='.length));
-			history.replaceState(null, '', window.location.pathname);
-			void goto(resolve('/notes'));
-		}
-		void loadUser().then(() => {
-			// Startup auth redirect (web and app alike). Skipped when a token
-			// was just captured — that path already routed to /notes above.
-			// /login must not bounce to itself, and /shared/* must stay
-			// reachable logged-out (share links are the guest feature). Offline
-			// note: loadUser falls back to the cached user on network failure,
-			// so an offline start with a previous login does NOT end up here
-			// with user === null — only genuinely signed-out states redirect.
-			if (capturedToken) return;
+		void (async () => {
+			// App build: the OIDC login returns the device token via the
+			// `dev.rustnote.app://auth` deep link. Register the handler and process
+			// any cold-start launch URL BEFORE the startup redirect below, so a
+			// launch via the login deep link doesn't briefly bounce through /login.
+			if (IS_APP) {
+				unlistenDeepLink = await initDeepLinkAuth(async () => {
+					await loadUser();
+					await goto(resolve('/notes'));
+				});
+			}
+
+			await loadUser();
+			// Startup auth redirect (web and app alike). /login must not bounce to
+			// itself, and /shared/* must stay reachable logged-out (share links are
+			// the guest feature). Offline: loadUser falls back to the cached user,
+			// so an offline start with a previous login does NOT land here with
+			// user === null — only genuinely signed-out states redirect.
 			const path = window.location.pathname;
 			if (path === '/login' || path === '/shared' || path.startsWith('/shared/')) return;
 			if (get(auth).user === null) {
@@ -144,7 +145,8 @@
 				// Logged in on the landing blurb: go straight to the notes list.
 				void goto(resolve('/notes'));
 			}
-		});
+		})();
+
 		void loadSettings();
 
 		// Safe-area fallback (app only): the edge-to-edge plugin is supposed to
@@ -163,6 +165,8 @@
 				}
 			}, 500);
 		}
+
+		return () => unlistenDeepLink?.();
 	});
 
 	// Keep the DOM's data-theme in sync with the resolved theme (mirrors the

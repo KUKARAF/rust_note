@@ -1,10 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { API_BASE_URL } from '$lib/api/client';
-	import { IS_APP } from '$lib/api/deviceToken';
 	import { auth, consumeLoginRequired } from '$lib/stores/auth';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
+	import { startLogin } from '$lib/app/login';
 	import Card from '$lib/design/Card.svelte';
 	import Button from '$lib/design/Button.svelte';
 	import Toast from '$lib/design/Toast.svelte';
@@ -25,13 +24,12 @@
 		}
 	});
 
+	// Web: a full browser navigation to the backend OIDC flow, which redirects
+	// back with a session cookie. App: opens the OS browser and the flow ends by
+	// handing the device token back through the `dev.rustnote.app://auth` deep
+	// link — see $lib/app/login and $lib/app/deepLinkAuth.
 	function login() {
-		// Full browser navigation (not a fetch): the backend handles the OIDC
-		// flow itself and redirects back once authenticated. The app build asks
-		// for the device-token variant (`?client=app`): instead of a session
-		// cookie, the flow ends at `tauri.localhost/#token=<raw>` — see
-		// $lib/api/deviceToken.
-		window.location.href = `${API_BASE_URL}/auth/login${IS_APP ? '?client=app' : ''}`;
+		void startLogin();
 	}
 </script>
 

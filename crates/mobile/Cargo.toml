@@ -33,5 +33,11 @@ tauri-plugin-edge-to-edge = "=0.3.3"
 # crate — the IPC contract between them is version-locked.
 tauri-plugin-android-fs = "=29.0.0"
 
+# OIDC login: open the OS browser (opener) for the OAuth flow and receive the
+# device token back via the `dev.rustnote.app://auth` custom-scheme deep link
+# (deep-link). Keep in lockstep with the @tauri-apps/plugin-* npm packages.
+tauri-plugin-deep-link = "2.4.9"
+tauri-plugin-opener = "2.5.4"
+
 [build-dependencies]
 tauri-build = { version = "2" }

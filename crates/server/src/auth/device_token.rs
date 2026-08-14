@@ -3,11 +3,11 @@
 //! The Tauri Android app's webview origin (`http://tauri.localhost`) is
 //! cross-site to this server, so the `SameSite=Lax` session cookie is never
 //! sent on its `fetch`es or WebSocket upgrades. Instead, the app completes
-//! the normal OIDC login as top-level navigations (see
-//! [`super::oidc`]'s `?client=app` flow), receives a device token in the
-//! final redirect's URL *fragment*, and authenticates every subsequent
-//! request with `Authorization: Bearer <token>` (REST) or `?token=` (collab
-//! WebSocket — see `collab::ws`).
+//! the normal OIDC login in the system browser (see [`super::oidc`]'s
+//! `?client=app` flow), receives a device token via a custom-scheme deep link
+//! (`dev.rustnote.app://auth?token=<raw>`, routed to the app by Android), and
+//! authenticates every subsequent request with `Authorization: Bearer <token>`
+//! (REST) or `?token=` (collab WebSocket — see `collab::ws`).
 //!
 //! # Storage & timing safety
 //!

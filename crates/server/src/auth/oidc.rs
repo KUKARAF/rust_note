@@ -127,11 +127,13 @@ impl OidcClient {
 const FLOW_COOKIE_NAME: &str = "rustnote_oidc_flow";
 const FLOW_COOKIE_MAX_AGE: time::Duration = time::Duration::minutes(5);
 
-/// The redirect target for the mobile app's login flow. This is Tauri 2's
-/// fixed Android webview origin (the webview intercepts navigations to this
-/// host and serves the bundled frontend). If an iOS app is ever added it
-/// would need `tauri://localhost` instead.
-const APP_REDIRECT_ORIGIN: &str = "http://tauri.localhost";
+/// The redirect target for the mobile app's login flow: a custom-scheme deep
+/// link the Android app registers (via tauri-plugin-deep-link). Android routes
+/// this URI to the app, which reads the device token from its query string.
+/// Replaces the old `http://tauri.localhost` webview redirect, whose cleartext
+/// navigation was blocked in non-debuggable (release) builds. If an iOS app is
+/// ever added, the same scheme works once registered on that platform too.
+const APP_REDIRECT_ORIGIN: &str = "dev.rustnote.app://auth";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct FlowState {
@@ -306,24 +308,28 @@ async fn callback(
     // unused-import warning.
     let _ = token_response.access_token();
 
-    // App logins get a device token minted and delivered via the redirect's
-    // URL *fragment*: the fragment never appears in any request line, so it
-    // cannot reach server or proxy access logs — the raw token exists only
-    // in this Location header and inside the app's webview.
+    // App logins get a device token minted and delivered via a custom-scheme
+    // deep link (dev.rustnote.app://auth?token=<raw>): Android routes the URI
+    // to the app, which reads the token from the query. The raw token is
+    // URL-safe base64 (no escaping needed) and appears only in this Location
+    // header and the app's deep-link intent — never in a request line to a
+    // server. Query (not fragment) is used deliberately: a browser can drop a
+    // #fragment when launching a custom-scheme intent, whereas the query is
+    // delivered intact.
     //
     // CSRF/abuse: the `client` flag rides inside this *encrypted, private*
     // flow cookie alongside the PKCE verifier and CSRF state, so an attacker
-    // cannot flip a victim's in-flight web login into an app login. Linking
-    // a victim directly to /auth/login?client=app in a normal browser mints
-    // a token that ends up in a navigation to http://tauri.localhost — an
-    // unresolvable host off-device, and the fragment never leaves the
-    // victim's browser. Residual risk (a nuisance token on the victim's own
-    // account) is bounded by the per-user cap and sliding expiry.
+    // cannot flip a victim's in-flight web login into an app login. Linking a
+    // victim directly to /auth/login?client=app in a normal browser mints a
+    // token that ends up in a redirect to `dev.rustnote.app://` — a scheme with
+    // no handler unless the app is installed, so it goes nowhere. Residual risk
+    // (a nuisance token on the victim's own account) is bounded by the per-user
+    // cap and sliding expiry.
     if flow_state.client.as_deref() == Some("app") {
         let raw = crate::auth::device_token::create(&state.db, &sub, "android-app").await?;
         return Ok((
             jar,
-            Redirect::to(&format!("{APP_REDIRECT_ORIGIN}/#token={raw}")),
+            Redirect::to(&format!("{APP_REDIRECT_ORIGIN}?token={raw}")),
         ));
     }
 
