@@ -67,7 +67,9 @@ async fn put_settings(
     }
     if let Some(model) = &body.openrouter_model {
         if !is_valid_model_id(model) {
-            return Err(AppError::BadRequest("invalid OpenRouter model id".to_string()));
+            return Err(AppError::BadRequest(
+                "invalid OpenRouter model id".to_string(),
+            ));
         }
     }
 
@@ -285,7 +287,10 @@ mod tests {
         assert_eq!(resp.openrouter_model, "anthropic/claude-3.5-haiku");
         assert!(resp.has_openrouter_key);
         let json = serde_json::to_string(&resp).unwrap();
-        assert!(!json.contains("sk-secret-123"), "raw key must never be serialized");
+        assert!(
+            !json.contains("sk-secret-123"),
+            "raw key must never be serialized"
+        );
 
         // The key IS persisted server-side (readable by the query endpoint).
         let content = state.notes_repo.read_file(&rel_path).unwrap().unwrap();

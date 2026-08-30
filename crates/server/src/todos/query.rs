@@ -220,9 +220,8 @@ async fn call_openrouter(model: &str, key: &str, nl: &str) -> AppResult<QuerySpe
 
     let json = extract_json(&content)
         .ok_or_else(|| AppError::Internal(anyhow!("no JSON object in model output")))?;
-    let spec: QuerySpec = serde_json::from_str(json).map_err(|e| {
-        AppError::Internal(anyhow!("could not parse the model's query JSON: {e}"))
-    })?;
+    let spec: QuerySpec = serde_json::from_str(json)
+        .map_err(|e| AppError::Internal(anyhow!("could not parse the model's query JSON: {e}")))?;
     Ok(spec.sanitized())
 }
 

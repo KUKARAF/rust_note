@@ -525,7 +525,8 @@ mod tests {
         {
             let awareness = room2.lock_awareness();
             let mut txn = awareness.doc().transact_mut();
-            txn.apply_update(Update::decode_v1(&resync).unwrap()).unwrap();
+            txn.apply_update(Update::decode_v1(&resync).unwrap())
+                .unwrap();
         }
         assert_eq!(
             room2.snapshot_text(),

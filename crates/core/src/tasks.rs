@@ -309,7 +309,10 @@ mod tests {
 
     #[test]
     fn star_bullet_and_double_space() {
-        assert_eq!(parse_one("* [ ] chunking rework").text_clean, "chunking rework");
+        assert_eq!(
+            parse_one("* [ ] chunking rework").text_clean,
+            "chunking rework"
+        );
         assert_eq!(parse_one("-  [ ] double space").text_clean, "double space");
         assert_eq!(parse_one("+ [ ] plus bullet").text_clean, "plus bullet");
     }

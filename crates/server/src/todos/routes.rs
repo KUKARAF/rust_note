@@ -180,7 +180,10 @@ mod tests {
 
     #[test]
     fn diary_date_matches_only_daily_notes() {
-        assert_eq!(diary_date("diary/2026-08-13").as_deref(), Some("2026-08-13"));
+        assert_eq!(
+            diary_date("diary/2026-08-13").as_deref(),
+            Some("2026-08-13")
+        );
         assert_eq!(diary_date("diary/2026-8-13"), None);
         assert_eq!(diary_date("diary/2026-08-13/extra"), None);
         assert_eq!(diary_date("notes/foo"), None);
