@@ -330,6 +330,13 @@ async fn write_note(
         .await
         .map_err(AppError::Internal)?;
 
+    // This write replaced the file outside collab, so any stored CRDT
+    // continuity blob is now stale. Drop it so the next collab room build
+    // re-seeds from this new disk text rather than resurrecting old state.
+    acl::delete_note_crdt(&state.db, note_id)
+        .await
+        .map_err(AppError::Internal)?;
+
     // Keep the DB `updated_at` current so the (git-history-free) list endpoint
     // reports an accurate last-modified time.
     acl::touch_updated_at(&state.db, note_id)

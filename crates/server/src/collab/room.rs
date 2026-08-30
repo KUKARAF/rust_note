@@ -34,7 +34,8 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc};
 use yrs::sync::Awareness;
-use yrs::{Doc, GetString, Text, Transact};
+use yrs::updates::decoder::Decode;
+use yrs::{Doc, GetString, ReadTxn, StateVector, Text, Transact, Update};
 
 use crate::notes::fs_store::note_id_to_path;
 use crate::state::AppState;
@@ -143,6 +144,23 @@ impl Room {
         let contents = text.get_string(&doc.transact());
         contents
     }
+
+    /// Full CRDT state of the doc as a v1 update blob, read under the mutex.
+    /// Persisted on every flush (see [`super::persist::flush_room`]) so a
+    /// reaped room can be rebuilt with the same CRDT identity via
+    /// [`build_room`] rather than re-seeded from plain text (which would
+    /// duplicate content against a client that kept its own doc). Never holds
+    /// the lock across an `.await` — it returns owned bytes.
+    pub fn snapshot_state(&self) -> Vec<u8> {
+        let awareness = self.lock_awareness();
+        let doc = awareness.doc();
+        // Bind to a local so the read transaction temporary is dropped at the
+        // `;` (before the mutex guard), not carried to the end of the block.
+        let state = doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        state
+    }
 }
 
 /// Registry of all live [`Room`]s, keyed by note id. Cheap to clone.
@@ -166,15 +184,53 @@ impl RoomRegistry {
     ///
     /// The caller MUST balance this with exactly one [`RoomRegistry::release`]
     /// when the connection ends (the WS handler does so via a drop guard).
-    pub fn get_or_create(&self, note_id: &str, user_id: &str, state: &AppState) -> Arc<Room> {
+    ///
+    /// Seeding a *new* room needs an async DB read (the note's stored CRDT
+    /// blob), which cannot happen while holding the `DashMap` shard lock. So
+    /// the hot path — a room that already exists — is handled first under the
+    /// lock with no DB hit; only when the room must be created do we `.await`
+    /// the blob load and then take the lock again to insert it. Re-checking
+    /// occupancy after the await closes the race where two joiners create the
+    /// same room concurrently (the loser discards its pre-loaded blob).
+    pub async fn get_or_create(&self, note_id: &str, user_id: &str, state: &AppState) -> Arc<Room> {
+        // Hot path: attach to an existing room. Incrementing under the shard
+        // lock keeps it mutually exclusive with the reaper's removal check, so
+        // we can never attach to a room the reaper is about to drop.
+        if self.rooms.contains_key(note_id) {
+            if let Entry::Occupied(entry) = self.rooms.entry(note_id.to_string()) {
+                let room = entry.get();
+                room.connections.fetch_add(1, Ordering::AcqRel);
+                return room.clone();
+            }
+            // Reaped in the gap between the peek and the lock — fall through
+            // to the create path.
+        }
+
+        // Create path: load the stored CRDT continuity blob (if any) before
+        // touching the map. A read error is non-fatal — we just fall back to
+        // seeding the fresh room from disk text.
+        let crdt = match crate::notes::acl::load_note_crdt(&state.db, note_id).await {
+            Ok(blob) => blob,
+            Err(err) => {
+                tracing::error!(
+                    note_id = %note_id,
+                    error = %err,
+                    "failed to load stored CRDT blob; seeding room from disk text",
+                );
+                None
+            }
+        };
+
         match self.rooms.entry(note_id.to_string()) {
             Entry::Occupied(entry) => {
+                // Another joiner created it during our await; reuse it and
+                // drop the blob we loaded.
                 let room = entry.get();
                 room.connections.fetch_add(1, Ordering::AcqRel);
                 room.clone()
             }
             Entry::Vacant(entry) => {
-                let (room, dirty_rx) = build_room(note_id, user_id, state);
+                let (room, dirty_rx) = build_room(note_id, user_id, state, crdt);
                 room.connections.fetch_add(1, Ordering::AcqRel);
                 super::persist::spawn_persistence(Arc::downgrade(&room), state.clone(), dirty_rx);
                 entry.insert(room.clone());
@@ -248,15 +304,47 @@ impl RoomRegistry {
     }
 }
 
-/// Construct (but do not register) a room for `note_id`, seeding its doc's
-/// `"content"` text from the note's current on-disk markdown.
+/// Construct (but do not register) a room for `note_id`.
+///
+/// When `crdt` carries a previously-persisted CRDT blob, the doc is rebuilt
+/// from it so it keeps the same item/client ids as the doc clients already
+/// hold — reconnecting clients then diff cleanly instead of unioning two
+/// independent insertions of the same text (the screen-lock duplication bug).
+/// Otherwise (first-ever open, or the blob was invalidated by an out-of-band
+/// write) the doc is seeded from the note's current on-disk markdown.
 fn build_room(
     note_id: &str,
     user_id: &str,
     state: &AppState,
+    crdt: Option<Vec<u8>>,
 ) -> (Arc<Room>, mpsc::UnboundedReceiver<()>) {
     let doc = Doc::new();
-    {
+    let seeded_from_crdt = match crdt.as_deref().map(Update::decode_v1) {
+        Some(Ok(update)) => {
+            let mut txn = doc.transact_mut();
+            match txn.apply_update(update) {
+                Ok(()) => true,
+                Err(err) => {
+                    tracing::error!(
+                        note_id = %note_id,
+                        error = %err,
+                        "stored CRDT blob failed to apply; re-seeding from disk text",
+                    );
+                    false
+                }
+            }
+        }
+        Some(Err(err)) => {
+            tracing::error!(
+                note_id = %note_id,
+                error = %err,
+                "stored CRDT blob failed to decode; re-seeding from disk text",
+            );
+            false
+        }
+        None => false,
+    };
+    if !seeded_from_crdt {
         let text = doc.get_or_insert_text(CONTENT_FIELD);
         let seed = state
             .notes_repo
@@ -358,14 +446,115 @@ mod tests {
             .unwrap();
 
         let registry = RoomRegistry::new();
-        let room = registry.get_or_create("seed-note", "admin", &state);
+        let room = registry.get_or_create("seed-note", "admin", &state).await;
         assert_eq!(room.snapshot_text(), "# seeded\n");
         assert_eq!(room.connections.load(Ordering::Acquire), 1);
 
         // Second opener reuses the same room and bumps the counter.
-        let room2 = registry.get_or_create("seed-note", "admin", &state);
+        let room2 = registry.get_or_create("seed-note", "admin", &state).await;
         assert!(Arc::ptr_eq(&room, &room2));
         assert_eq!(room.connections.load(Ordering::Acquire), 2);
         assert_eq!(registry.len(), 1);
+    }
+
+    /// Regression for the Android screen-lock duplication bug: once a room's
+    /// CRDT state is persisted, a reaped room is rebuilt from that blob with
+    /// the *same* CRDT identity, so a client resyncing its retained doc diffs
+    /// cleanly instead of unioning two independent insertions of the same
+    /// text. Before the fix the rebuild re-seeded from plain markdown under a
+    /// fresh clientID, and this resync produced `"hello world\nhello world\n"`.
+    #[tokio::test]
+    async fn rebuilt_room_from_blob_does_not_duplicate_on_client_resync() {
+        let (state, _notes_dir, _db_dir) = crate::collab::test_support::test_state().await;
+        // The note exists on disk but starts empty; its content is authored live.
+        state
+            .notes_repo
+            .write_and_commit("dup.md", "", "admin", "a@e", "seed")
+            .await
+            .unwrap();
+
+        let registry = RoomRegistry::new();
+        let room = registry.get_or_create("dup", "admin", &state).await;
+
+        // A client authors the note in its own doc (its own clientID) and
+        // syncs the edit up to the room, exactly as the WS Update path would.
+        let client = Doc::new();
+        let client_text = client.get_or_insert_text(CONTENT_FIELD);
+        {
+            let mut txn = client.transact_mut();
+            client_text.insert(&mut txn, 0, "hello world\n");
+        }
+        let edit = {
+            let sv = room.lock_awareness().doc().transact().state_vector();
+            client.transact().encode_state_as_update_v1(&sv)
+        };
+        {
+            let awareness = room.lock_awareness();
+            let mut txn = awareness.doc().transact_mut();
+            txn.apply_update(Update::decode_v1(&edit).unwrap()).unwrap();
+        }
+        room.mark_dirty();
+        assert_eq!(room.snapshot_text(), "hello world\n");
+
+        // Flush persists the CRDT blob (carrying the client's lineage).
+        crate::collab::persist::flush_room(&room, &state)
+            .await
+            .unwrap();
+        assert!(
+            crate::notes::acl::load_note_crdt(&state.db, "dup")
+                .await
+                .unwrap()
+                .is_some(),
+            "flush should persist a CRDT continuity blob",
+        );
+
+        // Simulate the room being reaped (the WebView frozen on screen-lock):
+        // drop it and rebuild from a fresh registry, which reloads the blob.
+        drop(room);
+        let registry2 = RoomRegistry::new();
+        let room2 = registry2.get_or_create("dup", "admin", &state).await;
+        assert_eq!(room2.snapshot_text(), "hello world\n");
+
+        // The client reconnects and resyncs: it sends the server everything
+        // the server's state vector is missing. Sharing lineage, that diff is
+        // empty and the text is unchanged (no duplication).
+        let resync = {
+            let sv = room2.lock_awareness().doc().transact().state_vector();
+            client.transact().encode_state_as_update_v1(&sv)
+        };
+        {
+            let awareness = room2.lock_awareness();
+            let mut txn = awareness.doc().transact_mut();
+            txn.apply_update(Update::decode_v1(&resync).unwrap()).unwrap();
+        }
+        assert_eq!(
+            room2.snapshot_text(),
+            "hello world\n",
+            "text must not duplicate after reap + rebuild",
+        );
+    }
+
+    /// A REST write invalidates the stored CRDT blob so the next room build
+    /// re-seeds from the newer disk text rather than resurrecting old state.
+    #[tokio::test]
+    async fn rest_write_invalidates_crdt_blob() {
+        let (state, _notes_dir, _db_dir) = crate::collab::test_support::test_state().await;
+        crate::notes::acl::ensure_note_registered(&state.db, "inv", "admin")
+            .await
+            .unwrap();
+        crate::notes::acl::save_note_crdt(&state.db, "inv", b"stale-blob")
+            .await
+            .unwrap();
+
+        crate::notes::acl::delete_note_crdt(&state.db, "inv")
+            .await
+            .unwrap();
+        assert!(
+            crate::notes::acl::load_note_crdt(&state.db, "inv")
+                .await
+                .unwrap()
+                .is_none(),
+            "blob should be gone after invalidation",
+        );
     }
 }

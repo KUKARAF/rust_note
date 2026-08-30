@@ -139,13 +139,60 @@ pub async fn touch_updated_at(db: &SqlitePool, note_id: &str) -> anyhow::Result<
 }
 
 /// Remove a note's `notes` row and any `note_access` grants for it (used on
-/// deletion).
+/// deletion). Also drops any stored CRDT continuity blob so a re-created note
+/// with the same id doesn't resurrect the old note's collab state.
 pub async fn deregister_note(db: &SqlitePool, note_id: &str) -> anyhow::Result<()> {
     sqlx::query("DELETE FROM note_access WHERE note_id = ?")
         .bind(note_id)
         .execute(db)
         .await?;
+    delete_note_crdt(db, note_id).await?;
     sqlx::query("DELETE FROM notes WHERE id = ?")
+        .bind(note_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Load the stored Yjs CRDT continuity blob for `note_id`, if any.
+///
+/// Used by `collab::room::build_room` to rebuild a reaped room's doc from its
+/// prior CRDT state (preserving item/client ids) instead of re-seeding from
+/// plain markdown, which would mint a fresh CRDT identity and duplicate text
+/// against a client that kept its own doc. `None` when the note has never
+/// been collaboratively edited, or its blob was invalidated by an out-of-band
+/// write (see [`delete_note_crdt`]).
+pub async fn load_note_crdt(db: &SqlitePool, note_id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    let row: Option<(Vec<u8>,)> = sqlx::query_as("SELECT state FROM note_crdt WHERE note_id = ?")
+        .bind(note_id)
+        .fetch_optional(db)
+        .await?;
+    Ok(row.map(|(state,)| state))
+}
+
+/// Persist (upsert) the Yjs CRDT continuity blob for `note_id`. Called on
+/// every collab flush so a room that is later reaped can be rebuilt with the
+/// same CRDT identity.
+pub async fn save_note_crdt(db: &SqlitePool, note_id: &str, state: &[u8]) -> anyhow::Result<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        "INSERT INTO note_crdt (note_id, state, updated_at) VALUES (?, ?, ?) \
+         ON CONFLICT(note_id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at",
+    )
+    .bind(note_id)
+    .bind(state)
+    .bind(&now)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Invalidate a note's stored CRDT blob. Called when the note file is written
+/// outside collab (REST PUT/POST) so the disk markdown becomes the source of
+/// truth again and the next room build re-seeds from it rather than from a now
+/// -stale blob. A no-op when no blob exists.
+pub async fn delete_note_crdt(db: &SqlitePool, note_id: &str) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM note_crdt WHERE note_id = ?")
         .bind(note_id)
         .execute(db)
         .await?;

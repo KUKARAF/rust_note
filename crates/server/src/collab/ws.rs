@@ -148,7 +148,7 @@ async fn ws_handler(
         .unwrap_or(false);
 
     // Attach to (or lazily create) the room. Balanced by `ConnGuard` below.
-    let room = state.rooms.get_or_create(&note_id, &user_id, &state);
+    let room = state.rooms.get_or_create(&note_id, &user_id, &state).await;
 
     // Convenience metadata for the client (optional — see module docs).
     let color = share_identity::color_for_id(&user_id);
@@ -220,7 +220,8 @@ async fn guest_ws_handler(
     // `room::build_room` / `persist::flush_room`'s new-note safety net.
     let room = state
         .rooms
-        .get_or_create(&link.note_id, &link.owner_id, &state);
+        .get_or_create(&link.note_id, &link.owner_id, &state)
+        .await;
 
     // Fresh guest identity per connection (v1: no reconnect-stable identity
     // cookie yet — see `auth::share_identity` module docs for the cookie
@@ -474,7 +475,7 @@ mod tests {
             .write_and_commit("doc.md", "# live\n", "admin", "a@e", "seed")
             .await
             .unwrap();
-        let room = state.rooms.get_or_create("doc", "admin", &state);
+        let room = state.rooms.get_or_create("doc", "admin", &state).await;
 
         // A fresh client with an empty doc sends its state vector.
         let client = Doc::new();
@@ -508,7 +509,7 @@ mod tests {
             .write_and_commit("edit.md", "start\n", "admin", "a@e", "seed")
             .await
             .unwrap();
-        let room = state.rooms.get_or_create("edit", "admin", &state);
+        let room = state.rooms.get_or_create("edit", "admin", &state).await;
         let mut rx = room.subscribe();
 
         // Peer builds a doc update carrying its own edit, expressed relative
@@ -552,7 +553,7 @@ mod tests {
             .write_and_commit("aw.md", "x\n", "admin", "a@e", "seed")
             .await
             .unwrap();
-        let room = state.rooms.get_or_create("aw", "admin", &state);
+        let room = state.rooms.get_or_create("aw", "admin", &state).await;
         let mut rx = room.subscribe();
 
         let peer = Awareness::new(Doc::new());
@@ -600,7 +601,7 @@ mod tests {
             .write_and_commit("ro.md", "start\n", "admin", "a@e", "seed")
             .await
             .unwrap();
-        let room = state.rooms.get_or_create("ro", "admin", &state);
+        let room = state.rooms.get_or_create("ro", "admin", &state).await;
 
         let peer = Doc::new();
         let peer_text = peer.get_or_insert_text(CONTENT_FIELD);

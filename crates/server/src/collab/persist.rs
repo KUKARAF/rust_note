@@ -116,22 +116,41 @@ pub async fn flush_room(room: &Arc<Room>, state: &AppState) -> anyhow::Result<()
     }
 
     let text = room.snapshot_text();
+    // Full CRDT state, captured alongside the text so a later reap can rebuild
+    // the room with the same CRDT identity (see `Room::snapshot_state`).
+    let crdt = room.snapshot_state();
     let note_id = &room.note_id;
     let rel_path = note_id_to_path(note_id);
 
     // Serialize against REST writes/deletes for this note id.
     let _note_guard = state.note_locks.lock(note_id).await;
 
-    let current = state.notes_repo.read_file(&rel_path)?.unwrap_or_default();
-    if current == text {
-        return Ok(()); // already in sync; avoid an empty commit
-    }
-
     // Normally the note already exists (the WS handler rejects opening a
     // note the user can't read, which implies a `notes` row). This is a
     // safety net for the new-note case: ensure the file we're about to
     // write is owned and therefore visible to the ACL-checked REST routes.
+    // It must also run before `save_note_crdt`, whose row references
+    // `notes(id)` (foreign keys are enforced).
     acl::ensure_note_registered(&state.db, note_id, &room.owner_hint).await?;
+
+    // Persist the CRDT blob on every flush, independent of whether the plain
+    // text changed: the doc's client ids / history evolve even when the
+    // rendered text is momentarily identical, and it's the blob (not the
+    // text) that lets a reaped room rebuild without duplicating content. A
+    // failure here loses only continuity for this cycle, never the human's
+    // text, so it must not block the commit below.
+    if let Err(err) = acl::save_note_crdt(&state.db, note_id, &crdt).await {
+        tracing::warn!(
+            note_id = %note_id,
+            error = %err,
+            "failed to persist CRDT continuity blob; text flush continues",
+        );
+    }
+
+    let current = state.notes_repo.read_file(&rel_path)?.unwrap_or_default();
+    if current == text {
+        return Ok(()); // already in sync; avoid an empty commit
+    }
 
     let message = format!("collab edit {note_id}");
     if let Err(err) = state
