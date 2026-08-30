@@ -2733,6 +2733,7 @@ name = "mobile"
 version = "0.1.0"
 dependencies = [
  "rust-note-core",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-android-fs",
