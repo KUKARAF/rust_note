@@ -20,6 +20,8 @@ export interface Todo {
 	start: string | null;
 	due: string | null;
 	tags: string[];
+	/** `@location` contexts (no leading `@`, lowercased). Empty when none. */
+	locations: string[];
 	burner: Burner | null;
 }
 
@@ -44,6 +46,12 @@ export interface QuerySpec {
 	burners?: Burner[];
 	/** Keep only tasks carrying ALL of these tags (without the leading `#`). */
 	tags?: string[];
+	/**
+	 * Location contexts (without the leading `@`). A task is kept if it carries
+	 * ANY of these locations — OR has no location at all (a location-less task is
+	 * relevant in every context, so it stays visible when filtering by place).
+	 */
+	locations?: string[];
 	/** open / done / all (default all — the board shows done dimmed). */
 	status?: StatusFilter;
 	pomodorosMin?: number;
@@ -110,6 +118,12 @@ function matchesFilters(todo: Todo, spec: QuerySpec): boolean {
 	if (spec.tags && spec.tags.length > 0) {
 		const have = new Set(todo.tags.map((t) => t.toLowerCase()));
 		if (!spec.tags.every((t) => have.has(t.toLowerCase()))) return false;
+	}
+	if (spec.locations && spec.locations.length > 0 && todo.locations.length > 0) {
+		// Context filter: a placed task must match one of the wanted locations.
+		// Location-less tasks intentionally skip this check (kept everywhere).
+		const want = new Set(spec.locations.map((l) => l.toLowerCase()));
+		if (!todo.locations.some((l) => want.has(l.toLowerCase()))) return false;
 	}
 	if (spec.pomodorosMin != null && (todo.pomodoros ?? 0) < spec.pomodorosMin) return false;
 	if (spec.pomodorosMax != null && (todo.pomodoros ?? Infinity) > spec.pomodorosMax) return false;

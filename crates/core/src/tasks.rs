@@ -9,9 +9,11 @@
 //!   and `[o]` legacy-started (both treated as open). A double space after the
 //!   bullet (`-  [ ]`) is tolerated.
 //! - Inline tokens: `p:N` (pomodoro estimate), `start:HH:MM` (time-of-day),
-//!   `due:<freeform>` (consumes to end of line), `#tag`.
+//!   `due:<freeform>` (consumes to end of line), `#tag`, `@location`.
 //! - Kitchen-burner priority from tags: `#fb`/`#frontburner`, `#bb`/`#backburner`,
 //!   `#fridge`, `#oven`.
+//! - Locations (`@work`, `@home`, `@store`) are GTD-style contexts, lowercased
+//!   and collected like tags; a task with none is left with an empty list.
 //! - Nesting via leading indentation, normalized to a 0-based `depth`.
 
 use serde::{Deserialize, Serialize};
@@ -52,6 +54,9 @@ pub struct Task {
     pub due: Option<String>,
     /// All `#tag`s on the line, without the leading `#`.
     pub tags: Vec<String>,
+    /// All `@location` contexts on the line, without the leading `@` and
+    /// lowercased (e.g. `["work", "home"]`). Empty when the task has none.
+    pub locations: Vec<String>,
     /// Kitchen-burner priority derived from `tags`, if any.
     pub burner: Option<Burner>,
 }
@@ -94,6 +99,7 @@ pub fn parse_tasks(doc: &str) -> Vec<Task> {
             start: meta.start,
             due: meta.due,
             tags: meta.tags,
+            locations: meta.locations,
             burner: meta.burner,
         });
     }
@@ -151,6 +157,7 @@ struct Metadata {
     start: Option<String>,
     due: Option<String>,
     tags: Vec<String>,
+    locations: Vec<String>,
     burner: Option<Burner>,
 }
 
@@ -188,6 +195,23 @@ fn extract_metadata(text: &str) -> Metadata {
         }
     }
 
+    // Locations (`@context`) are scanned across the whole line like tags, and
+    // lowercased so `@Work` and `@work` collapse into one context. Deduped
+    // within a line. A task with no `@` keeps an empty list — the todo board's
+    // location filter deliberately still shows those (relevant everywhere).
+    let mut locations = Vec::new();
+    for token in text.split_whitespace() {
+        if let Some(loc) = token.strip_prefix('@') {
+            let loc = loc.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+            if !loc.is_empty() {
+                let loc = loc.to_ascii_lowercase();
+                if !locations.contains(&loc) {
+                    locations.push(loc);
+                }
+            }
+        }
+    }
+
     let mut pomodoros = None;
     let mut start = None;
     let mut clean_tokens: Vec<&str> = Vec::new();
@@ -202,7 +226,7 @@ fn extract_metadata(text: &str) -> Metadata {
                 continue;
             }
         }
-        if token.starts_with('#') {
+        if token.starts_with('#') || token.starts_with('@') {
             continue;
         }
         clean_tokens.push(token);
@@ -216,6 +240,7 @@ fn extract_metadata(text: &str) -> Metadata {
         start,
         due,
         tags,
+        locations,
         burner,
     }
 }
@@ -325,6 +350,26 @@ mod tests {
         assert_eq!(t.tags, vec!["fb".to_string()]);
         assert_eq!(t.burner, Some(Burner::Frontburner));
         assert_eq!(t.text_clean, "contact businesses");
+    }
+
+    #[test]
+    fn locations_are_lowercased_stripped_and_deduped() {
+        let t = parse_one("- [ ] buy milk @Store p:1 @store #fb");
+        // Lowercased and deduped despite the mixed-case repeat.
+        assert_eq!(t.locations, vec!["store".to_string()]);
+        // Stripped from the display text (like #tags), other metadata intact.
+        assert_eq!(t.text_clean, "buy milk");
+        assert_eq!(t.pomodoros, Some(1));
+        assert_eq!(t.tags, vec!["fb".to_string()]);
+
+        // Multiple distinct contexts, and one sitting after a `due:` value is
+        // still found (whole-line scan, same as tags).
+        let t2 = parse_one("- [ ] errands @home due:today @work");
+        assert_eq!(t2.locations, vec!["home".to_string(), "work".to_string()]);
+        assert_eq!(t2.due.as_deref(), Some("today @work"));
+
+        // No `@` → empty list (so the board's location filter still shows it).
+        assert!(parse_one("- [ ] think about it").locations.is_empty());
     }
 
     #[test]

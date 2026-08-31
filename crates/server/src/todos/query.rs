@@ -38,6 +38,8 @@ struct QuerySpec {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    locations: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pomodoros_min: Option<u32>,
@@ -66,6 +68,19 @@ impl QuerySpec {
             bs.into_iter()
                 .map(|b| b.to_ascii_lowercase())
                 .filter(|b| BURNERS.contains(&b.as_str()))
+                .collect()
+        });
+        // Locations are an open vocabulary (not an enum), so just normalize:
+        // lowercase to match the parser, trim the `@` and stray punctuation,
+        // and drop anything that empties out.
+        self.locations = self.locations.map(|ls| {
+            ls.into_iter()
+                .map(|l| {
+                    l.trim_start_matches('@')
+                        .trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+                        .to_ascii_lowercase()
+                })
+                .filter(|l| !l.is_empty())
                 .collect()
         });
         self.status = self
@@ -103,6 +118,7 @@ The todo items come from daily notes and have these fields:
 - start: time-of-day "HH:MM". May be absent.
 - due: freeform due text. May be absent.
 - tags: list of hashtags (without the #).
+- locations: GTD-style contexts from `@` tokens (e.g. @work, @home, @store), without the @. May be absent.
 - date: the daily-note date "YYYY-MM-DD".
 - done: whether completed.
 
@@ -111,6 +127,7 @@ Output JSON schema (all fields optional — include only what the request implie
   "text": string,                 // substring to match in the task text
   "burners": string[],            // subset of the four burners above
   "tags": string[],               // tags that must all be present (no leading #)
+  "locations": string[],          // contexts; a task matches ANY of these (no leading @). Tasks with no location always stay visible.
   "status": "open" | "done" | "all",
   "pomodorosMin": number,
   "pomodorosMax": number,
@@ -121,6 +138,8 @@ Examples:
 - "fridge stuff, most pomodoros first" -> {"burners":["fridge"],"sort":[{"field":"pomodoros","dir":"desc"}]}
 - "open frontburner tasks" -> {"burners":["frontburner"],"status":"open"}
 - "quick wins" -> {"pomodorosMax":1,"status":"open"}
+- "stuff to do at the store" -> {"locations":["store"]}
+- "errands at home or work" -> {"locations":["home","work"]}
 - "what's due, soonest first" -> {"sort":[{"field":"due","dir":"asc"}]}"#;
 
 async fn query_todos(
@@ -268,6 +287,17 @@ mod tests {
 
         assert_eq!(spec.burners, Some(vec!["fridge".to_string()]));
         assert_eq!(spec.status, None); // "someday" dropped
+
+        // Locations: `@` stripped, lowercased, empties dropped (open vocabulary).
+        let loc = QuerySpec {
+            locations: Some(vec!["@Work".into(), "store".into(), "@".into()]),
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(
+            loc.locations,
+            Some(vec!["work".to_string(), "store".to_string()])
+        );
         let sort = spec.sort.unwrap();
         assert_eq!(sort.len(), 1);
         assert_eq!(sort[0].field, "pomodoros");

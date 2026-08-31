@@ -72,6 +72,19 @@
 		spec.burners = set.size ? [...set] : undefined;
 	}
 
+	// Locations are an open vocabulary discovered from the loaded todos, so the
+	// filter offers exactly the contexts in use (sorted), not a fixed list.
+	const availableLocations = $derived(
+		[...new Set(todos.flatMap((t) => t.locations))].sort((a, b) => a.localeCompare(b))
+	);
+
+	function toggleLocation(l: string) {
+		const set = new Set(spec.locations ?? []);
+		if (set.has(l)) set.delete(l);
+		else set.add(l);
+		spec.locations = set.size ? [...set] : undefined;
+	}
+
 	function setStatus(status: 'open' | 'all' | 'done') {
 		spec.status = status;
 	}
@@ -169,6 +182,8 @@
 				label: `#${t}`,
 				clear: () => (spec.tags = (spec.tags ?? []).filter((x) => x !== t))
 			});
+		for (const l of spec.locations ?? [])
+			out.push({ label: `@${l}`, clear: () => toggleLocation(l) });
 		if (spec.status && spec.status !== 'all')
 			out.push({ label: spec.status, clear: () => (spec.status = 'all') });
 		if (spec.pomodorosMin != null)
@@ -255,6 +270,20 @@
 				{/each}
 			</div>
 
+			{#if availableLocations.length > 0}
+				<div class="control-group">
+					<span class="control-label">location</span>
+					{#each availableLocations as loc (loc)}
+						<button
+							type="button"
+							class="pill"
+							class:active={spec.locations?.includes(loc)}
+							onclick={() => toggleLocation(loc)}>@{loc}</button
+						>
+					{/each}
+				</div>
+			{/if}
+
 			<div class="control-group filter-input">
 				<Input type="text" placeholder="filter text…" bind:value={textFilter}>
 					{#snippet prefix()}/{/snippet}
@@ -318,6 +347,9 @@
 										{#if todo.start}<span class="tag">@{todo.start}</span>{/if}
 										{#if todo.due}<span class="tag due">due:{todo.due}</span>{/if}
 										{#if todo.tags.length}<span class="tag hash">#{todo.tags.join(' #')}</span>{/if}
+										{#if todo.locations.length}<span class="tag loc"
+												>@{todo.locations.join(' @')}</span
+											>{/if}
 										{#if isSpoiling(todo, now)}<span class="tag spoiling"
 												>spoiling · {ageInDays(todo.date, now)}d</span
 											>{/if}
@@ -586,6 +618,9 @@
 	}
 	.tag.hash {
 		color: var(--kv-accent);
+	}
+	.tag.loc {
+		color: var(--kv-blue, var(--kv-accent));
 	}
 	.tag.spoiling {
 		color: var(--kv-danger);
