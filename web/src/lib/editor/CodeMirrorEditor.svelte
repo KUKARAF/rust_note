@@ -12,7 +12,7 @@
 	import { markdown } from '@codemirror/lang-markdown';
 	import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 	import { tags } from '@lezer/highlight';
-	import { basicSetup } from 'codemirror';
+	import { noteSetup } from './noteSetup';
 	import { yCollab, yUndoManagerKeymap } from 'y-codemirror.next';
 	import type * as Y from 'yjs';
 	import type { Awareness } from 'y-protocols/awareness';
@@ -105,11 +105,17 @@
 			'&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection': {
 				backgroundColor: 'rgba(121, 242, 121, 0.22) !important'
 			},
-			'.cm-gutters': {
+			// Line numbers live in the gutter AFTER the content (see noteSetup),
+			// so the separator is on its left edge. The always-present empty
+			// `.cm-gutters-before` element is left unstyled: zero width, no paint.
+			'.cm-gutters-after': {
 				backgroundColor: 'var(--surface-input)',
 				color: 'var(--kv-faint)',
 				border: 'none',
-				borderRight: '1px solid var(--border-default)'
+				borderLeft: '1px solid var(--border-default)'
+			},
+			'.cm-lineNumbers .cm-gutterElement': {
+				padding: '0 5px 0 8px'
 			},
 			'.cm-activeLineGutter': {
 				backgroundColor: 'transparent',
@@ -193,7 +199,7 @@
 		const state = EditorState.create({
 			doc: collabHandles ? collabHandles.ytext.toString() : value,
 			extensions: [
-				basicSetup,
+				noteSetup,
 				markdown(),
 				kvEditorTheme,
 				syntaxHighlighting(kvHighlightStyle),
