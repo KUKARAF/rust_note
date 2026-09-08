@@ -24,6 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
+# The server embeds docs/stats.md + docs/api_stats.md via include_str! (served
+# by GET /api/stats/docs), so the docs tree is a build input, not just prose.
+COPY docs/ docs/
 RUN cargo build --release -p server
 
 # ---- runtime -----------------------------------------------------------
