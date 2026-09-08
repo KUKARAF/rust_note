@@ -295,10 +295,8 @@ fn locate_block(doc: &str) -> Option<Block> {
                 lines,
             });
         }
-        match line_end {
-            Some(e) => offset = e + 1,
-            None => return None, // no closing fence
-        }
+        // No line terminator left means the frontmatter has no closing fence.
+        offset = line_end? + 1;
     }
 }
 
