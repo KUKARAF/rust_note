@@ -98,9 +98,7 @@ export function ageInDays(date: string | null, now: Date): number {
 /** A fridge task old enough to need attention. */
 export function isSpoiling(todo: Todo, now: Date): boolean {
 	return (
-		todo.burner === 'fridge' &&
-		!todo.done &&
-		ageInDays(todo.date, now) >= FRIDGE_SPOILS_AFTER_DAYS
+		todo.burner === 'fridge' && !todo.done && ageInDays(todo.date, now) >= FRIDGE_SPOILS_AFTER_DAYS
 	);
 }
 

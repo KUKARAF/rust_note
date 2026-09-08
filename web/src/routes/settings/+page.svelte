@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
 	import SectionTitle from '$lib/design/SectionTitle.svelte';
 	import Chip from '$lib/design/Chip.svelte';
@@ -187,8 +188,8 @@
 	<section class="settings-section">
 		<h2 class="settings-section-title">AI · OpenRouter</h2>
 		<p class="ai-help">
-			Powers the natural-language query on the <a href="/todo">Todos</a> board. Set a model and an
-			OpenRouter API key; the key is stored on the server and never shown again.
+			Powers the natural-language query on the <a href={resolve('/todo')}>Todos</a> board. Set a model
+			and an OpenRouter API key; the key is stored on the server and never shown again.
 		</p>
 
 		<div class="ai-field">

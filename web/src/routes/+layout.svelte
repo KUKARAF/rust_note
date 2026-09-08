@@ -174,7 +174,6 @@
 	$effect(() => {
 		document.documentElement.dataset.theme = $settings.theme;
 	});
-
 </script>
 
 <svelte:head>
@@ -197,6 +196,7 @@
 
 			<Button variant="outline" size="sm" onclick={() => openTodayNote()}>Today</Button>
 			<a class="nav-link" href={resolve('/todo')}>Todos</a>
+			<a class="nav-link" href={resolve('/stats')}>Stats</a>
 
 			<div class="app-nav-spacer"></div>
 

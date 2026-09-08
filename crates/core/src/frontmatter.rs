@@ -100,6 +100,17 @@ impl Frontmatter {
         }
     }
 
+    /// Remove every field whose key equals `prefix` or starts with
+    /// `"{prefix}."` (a dotted namespace). Returns the number removed. Used to
+    /// drop a whole `stat.<metric>.*` group when deleting a metric definition.
+    pub fn remove_prefix(&mut self, prefix: &str) -> usize {
+        let dotted = format!("{prefix}.");
+        let before = self.fields.len();
+        self.fields
+            .retain(|(k, _)| k != prefix && !k.starts_with(&dotted));
+        before - self.fields.len()
+    }
+
     /// Render back to `---\nkey: value\n...\n---\n{body}`. If there are no
     /// fields, renders just the body with no frontmatter block at all (so
     /// an empty `Frontmatter` round-trips to plain content, matching

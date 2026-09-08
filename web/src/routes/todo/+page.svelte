@@ -12,7 +12,6 @@
 	import Button from '$lib/design/Button.svelte';
 	import Input from '$lib/design/Input.svelte';
 	import SectionTitle from '$lib/design/SectionTitle.svelte';
-	import Chip from '$lib/design/Chip.svelte';
 	import {
 		applyQuery,
 		ageInDays,
@@ -66,10 +65,9 @@
 	}
 
 	function toggleBurner(b: Burner) {
-		const set = new Set(spec.burners ?? []);
-		if (set.has(b)) set.delete(b);
-		else set.add(b);
-		spec.burners = set.size ? [...set] : undefined;
+		const current = spec.burners ?? [];
+		const next = current.includes(b) ? current.filter((x) => x !== b) : [...current, b];
+		spec.burners = next.length ? next : undefined;
 	}
 
 	// Locations are an open vocabulary discovered from the loaded todos, so the
@@ -79,10 +77,9 @@
 	);
 
 	function toggleLocation(l: string) {
-		const set = new Set(spec.locations ?? []);
-		if (set.has(l)) set.delete(l);
-		else set.add(l);
-		spec.locations = set.size ? [...set] : undefined;
+		const current = spec.locations ?? [];
+		const next = current.includes(l) ? current.filter((x) => x !== l) : [...current, l];
+		spec.locations = next.length ? next : undefined;
 	}
 
 	function setStatus(status: 'open' | 'all' | 'done') {
@@ -211,11 +208,7 @@
 
 		<!-- Natural-language query -->
 		<div class="ai-row">
-			<Input
-				type="text"
-				placeholder="Ask: “fridge stuff, most pomodoros first”…"
-				bind:value={nl}
-			>
+			<Input type="text" placeholder="Ask: “fridge stuff, most pomodoros first”…" bind:value={nl}>
 				{#snippet prefix()}✦{/snippet}
 			</Input>
 			<Button variant="primary" size="sm" onclick={runQuery} disabled={asking || nl.trim() === ''}>
@@ -237,11 +230,7 @@
 						class:active={activeSort?.field === s.field}
 						onclick={() => setSort(s.field, s.defaultDir)}
 					>
-						{s.label}{activeSort?.field === s.field
-							? activeSort.dir === 'asc'
-								? ' ↑'
-								: ' ↓'
-							: ''}
+						{s.label}{activeSort?.field === s.field ? (activeSort.dir === 'asc' ? ' ↑' : ' ↓') : ''}
 					</button>
 				{/each}
 			</div>
@@ -326,11 +315,7 @@
 					</header>
 					<ul class="todo-list">
 						{#each group.todos as todo (todo.note_id + ':' + todo.line)}
-							<li
-								class="todo-row"
-								class:done={todo.done}
-								style="--depth: {todo.depth};"
-							>
+							<li class="todo-row" class:done={todo.done} style="--depth: {todo.depth};">
 								<button
 									type="button"
 									class="check"

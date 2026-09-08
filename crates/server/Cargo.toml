@@ -33,6 +33,9 @@ base64 = { workspace = true }
 lz-str = { workspace = true }
 sha2 = { workspace = true }
 time = { workspace = true }
+# Server-only: DST-aware "today in Europe/Warsaw" for /api/stats writes. Bundles
+# the IANA tz database and integrates with the existing `time` crate.
+time-tz = "2"
 dashmap = { workspace = true }
 uuid = { workspace = true }
 rand = { workspace = true }

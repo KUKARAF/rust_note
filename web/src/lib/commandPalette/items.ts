@@ -74,6 +74,13 @@ export function buildActions(ctx: { user: AuthUser | null }): PaletteItem[] {
 			run: () => goto(resolve('/todo'))
 		},
 		{
+			id: 'stats',
+			label: 'Stats',
+			hint: 'charts of daily-note metrics',
+			group: 'action',
+			run: () => goto(resolve('/stats'))
+		},
+		{
 			id: 'new-drawing',
 			label: 'New drawing',
 			hint: 'create an Excalidraw note',

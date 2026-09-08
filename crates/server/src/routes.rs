@@ -16,6 +16,7 @@ use crate::notes;
 use crate::settings;
 use crate::share;
 use crate::state::AppState;
+use crate::stats;
 use crate::todos;
 
 /// Maximum accepted request body size. A note is plain markdown; 1 MiB is far
@@ -53,6 +54,7 @@ pub fn build(state: AppState) -> Router {
         .merge(todos::routes::router())
         .merge(todos::query::router())
         .merge(settings::routes::router())
+        .merge(stats::routes::router())
         .merge(share::router())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,

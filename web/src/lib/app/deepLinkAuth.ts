@@ -19,9 +19,7 @@ function tokenFromUrl(url: string): string | null {
  * running). `onToken` runs after the token is stored, so the caller can refresh
  * the session and navigate. Returns an unlisten fn (a no-op if setup failed).
  */
-export async function initDeepLinkAuth(
-	onToken: () => void | Promise<void>
-): Promise<() => void> {
+export async function initDeepLinkAuth(onToken: () => void | Promise<void>): Promise<() => void> {
 	try {
 		const { getCurrent, onOpenUrl } = await import('@tauri-apps/plugin-deep-link');
 
