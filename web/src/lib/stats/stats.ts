@@ -93,27 +93,49 @@ export function foodCategory(
 	return 'meat';
 }
 
-/** Grams of sugar mapped to the darkest shade of a hue. */
-export const SUGAR_CAP_G = 80;
-
 /**
- * Sugar grams → discrete shade index 0..4 within a category hue (0 = lightest
- * at 0g, 4 = darkest at/above {@link SUGAR_CAP_G}). GitHub-contribution-style
- * quintiles across 0–80g.
+ * Sugar grams → discrete shade index 0..3 within a category hue. Four bins,
+ * matching the legend: 0–20 / 20–40 / 40–65 / 65 g+. In light mode a higher
+ * level is a darker shade; in dark mode the ramp is inverted (higher = more
+ * vivid) so heavy-sugar days don't sink into the surface — that inversion lives
+ * in the CSS custom-property ramps, not here.
  */
-export function sugarLevel(grams: number): 0 | 1 | 2 | 3 | 4 {
-	if (grams <= 0) return 0;
-	if (grams <= 20) return 1;
-	if (grams <= 40) return 2;
-	if (grams <= 60) return 3;
-	return 4;
+export function sugarLevel(grams: number): 0 | 1 | 2 | 3 {
+	if (grams < 20) return 0;
+	if (grams < 40) return 1;
+	if (grams < 65) return 2;
+	return 3;
 }
+
+/** Human labels for the four sugar bins (index-aligned with {@link sugarLevel}). */
+export const SUGAR_BIN_LABELS = ['0–20', '20–40', '40–65', '65 g+'] as const;
 
 /** Build a `date → aggregated value` map from a series' days. */
 export function dayValueMap(series: Series | undefined): Map<string, number> {
 	const map = new Map<string, number>();
 	if (series) for (const d of series.days) map.set(d.date, d.value);
 	return map;
+}
+
+/** Build a `date → timed points` map from a series' days. */
+export function dayPointsMap(series: Series | undefined): Map<string, StatPoint[]> {
+	const map = new Map<string, StatPoint[]>();
+	if (series) for (const d of series.days) map.set(d.date, d.points ?? []);
+	return map;
+}
+
+/** A day resolved for the food calendar and its detail sheet. */
+export interface FoodDay {
+	date: string; // YYYY-MM-DD
+	category: FoodCategory;
+	/** true when food was logged that day (category !== 'none'). */
+	logged: boolean;
+	sugar: number;
+	caffeine: number;
+	alcohol: number;
+	/** number of timed samples that day, for the sheet's sub-labels. */
+	caffeineCount: number;
+	alcoholCount: number;
 }
 
 // -- date helpers (UTC-based to avoid TZ drift on YYYY-MM-DD strings) --
@@ -136,40 +158,95 @@ export function mondayIndex(d: Date): number {
 	return (d.getUTCDay() + 6) % 7;
 }
 
-function addDays(d: Date, n: number): Date {
+export function addDays(d: Date, n: number): Date {
 	return new Date(d.getTime() + n * 86_400_000);
 }
 
-/** One cell of the food calendar (a real day, or a padding slot). */
-export interface CalendarCell {
-	/** `YYYY-MM-DD`, or null for a leading/trailing padding slot. */
-	date: string | null;
+const MONTH_ABBR = [
+	'Jan',
+	'Feb',
+	'Mar',
+	'Apr',
+	'May',
+	'Jun',
+	'Jul',
+	'Aug',
+	'Sep',
+	'Oct',
+	'Nov',
+	'Dec'
+];
+
+/** The `n` calendar dates ending at (and including) `end`, oldest first. */
+export function lastNDates(end: string, n: number): string[] {
+	const endD = parseISODate(end) ?? new Date();
+	const out: string[] = [];
+	for (let i = n - 1; i >= 0; i--) out.push(toISODate(addDays(endD, -i)));
+	return out;
 }
 
 /**
- * Lay dates from `start`..`end` (inclusive `YYYY-MM-DD`) into GitHub-style
- * columns of weeks × 7 weekday rows (Monday top). Leading/trailing slots that
- * fall outside the range are padding cells with a null date. Falls back to a
- * ~12-week window ending today when the range is missing/invalid.
+ * A labeled month block for the mobile calendar (weekday columns, weeks flowing
+ * downward). `leadingBlanks` pads the first row so the month's first in-range
+ * day sits under its weekday column (Monday-first).
  */
-export function buildCalendarWeeks(start: string, end: string, today: string): CalendarCell[][] {
+export interface CalendarMonth {
+	key: string; // "2026-8" (0-based month)
+	label: string; // "Sep 2026"
+	leadingBlanks: number;
+	dates: string[]; // in-range YYYY-MM-DD dates of this month, in order
+}
+
+/**
+ * Group the inclusive range `start`..`end` (`YYYY-MM-DD`) into month blocks for
+ * the transposed mobile calendar. Falls back to a ~6-week window ending today
+ * when the range is missing/invalid.
+ */
+export function buildCalendarMonths(start: string, end: string, today: string): CalendarMonth[] {
 	let endD = parseISODate(end) ?? parseISODate(today) ?? new Date();
-	let startD = parseISODate(start) ?? addDays(endD, -83);
+	let startD = parseISODate(start) ?? addDays(endD, -41);
 	if (startD > endD) [startD, endD] = [endD, startD];
-	// Snap the first column to the Monday on/before the start date.
-	const gridStart = addDays(startD, -mondayIndex(startD));
-	const weeks: CalendarCell[][] = [];
-	let cursor = gridStart;
+
+	const months: CalendarMonth[] = [];
+	let cursor = startD;
+	let current: CalendarMonth | null = null;
 	while (cursor <= endD) {
-		const week: CalendarCell[] = [];
-		for (let row = 0; row < 7; row++) {
-			const inRange = cursor >= startD && cursor <= endD;
-			week.push({ date: inRange ? toISODate(cursor) : null });
-			cursor = addDays(cursor, 1);
+		const y = cursor.getUTCFullYear();
+		const m = cursor.getUTCMonth();
+		const key = `${y}-${m}`;
+		if (current === null || current.key !== key) {
+			current = {
+				key,
+				label: `${MONTH_ABBR[m]} ${y}`,
+				leadingBlanks: mondayIndex(cursor),
+				dates: []
+			};
+			months.push(current);
 		}
-		weeks.push(week);
+		current.dates.push(toISODate(cursor));
+		cursor = addDays(cursor, 1);
 	}
-	return weeks;
+	return months;
+}
+
+/** Geometry for a compact area sparkline (values oldest→newest). */
+export interface Sparkline {
+	line: string;
+	area: string;
+	cx: number;
+	cy: number;
+}
+export function sparkline(vals: number[], w: number, h: number, pad = 3): Sparkline {
+	if (vals.length === 0) return { line: '', area: '', cx: w / 2, cy: h / 2 };
+	const max = Math.max(1, ...vals);
+	const n = vals.length;
+	const xAt = (i: number) => (n <= 1 ? w / 2 : pad + (i * (w - 2 * pad)) / (n - 1));
+	const yAt = (v: number) => h - pad - (v / max) * (h - 2 * pad);
+	const line = vals
+		.map((v, i) => `${i ? 'L' : 'M'}${xAt(i).toFixed(1)} ${yAt(v).toFixed(1)}`)
+		.join(' ');
+	const area = `${line} L${xAt(n - 1).toFixed(1)} ${(h - pad).toFixed(1)} L${xAt(0).toFixed(1)} ${(h - pad).toFixed(1)} Z`;
+	return { line, area, cx: xAt(n - 1), cy: yAt(vals[n - 1]) };
 }
 
 /** min/max across a series' day values, padded so a flat series still draws. */
