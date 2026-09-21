@@ -15,6 +15,9 @@
 	import {
 		valueRange,
 		statsRangeQuery,
+		dayValueMap,
+		FOOD_REGISTRY_DEFAULTS,
+		SUBSTANCE_METRICS,
 		CHART_KINDS,
 		AGG_KINDS,
 		type Series,
@@ -22,6 +25,7 @@
 		type StatsResponse,
 		type DayValue
 	} from '$lib/stats/stats';
+	import FoodCalendar from '$lib/stats/FoodCalendar.svelte';
 
 	let series = $state<Series[]>([]);
 	let registry = $state<MetricDef[]>([]);
@@ -32,6 +36,30 @@
 	// Date range (empty = server default, ~last 30 days).
 	let from = $state('');
 	let to = $state('');
+
+	const today = new Date().toISOString().slice(0, 10);
+
+	/**
+	 * Ensure the food/substance metrics exist in the registry so they show up in
+	 * `GET /api/stats`. Idempotent and non-clobbering: only metrics absent from
+	 * `existing` are PUT. Returns true if anything was added.
+	 */
+	async function ensureFoodRegistry(existing: MetricDef[]): Promise<boolean> {
+		const have = new Set(existing.map((d) => d.metric));
+		const missing = FOOD_REGISTRY_DEFAULTS.filter((d) => !have.has(d.metric));
+		if (missing.length === 0) return false;
+		await Promise.all(
+			missing.map((d) =>
+				apiPut<MetricDef>(`/api/stats/registry/${encodeURIComponent(d.metric)}`, {
+					label: d.label,
+					unit: d.unit,
+					chart: d.chart,
+					agg: d.agg
+				})
+			)
+		);
+		return true;
+	}
 
 	// Add/edit metric form.
 	let fMetric = $state('');
@@ -45,10 +73,13 @@
 		loading = true;
 		loadError = null;
 		try {
-			const [stats, reg] = await Promise.all([
-				apiGet<StatsResponse>(`/api/stats${statsRangeQuery(from, to)}`),
-				apiGet<MetricDef[]>('/api/stats/registry')
-			]);
+			// Make sure the food/substance metrics are registered (idempotent) so
+			// they come back in GET /api/stats; re-read the registry if we added any.
+			let reg = await apiGet<MetricDef[]>('/api/stats/registry');
+			if (await ensureFoodRegistry(reg)) {
+				reg = await apiGet<MetricDef[]>('/api/stats/registry');
+			}
+			const stats = await apiGet<StatsResponse>(`/api/stats${statsRangeQuery(from, to)}`);
 			series = stats.series;
 			registry = reg;
 		} catch (err) {
@@ -169,6 +200,38 @@
 	function total(days: DayValue[]): number {
 		return days.reduce((s, d) => s + d.value, 0);
 	}
+
+	// ---- grouping into Substances + Food -------------------------------------
+
+	function seriesBy(metric: string): Series | undefined {
+		return series.find((s) => s.metric === metric);
+	}
+
+	// Substances group: caffeine, alcohol, sugar — in that fixed order, only the
+	// ones that actually have a registered series.
+	const substanceSeries = $derived(
+		SUBSTANCE_METRICS.map(seriesBy).filter((s): s is Series => s !== undefined)
+	);
+
+	// Food group inputs. The booleans come back as boolean-per-day series (1 when
+	// the flag is true, 0 when present-but-false); sugar is the summed grams.
+	const veganMap = $derived(dayValueMap(seriesBy('vegan')));
+	const vegetarianMap = $derived(dayValueMap(seriesBy('vegetarian')));
+	const sugarMap = $derived(dayValueMap(seriesBy('sugar')));
+	const sugarSeries = $derived(seriesBy('sugar'));
+
+	// Calendar range: honour the picker if set, else span whatever food data the
+	// response covers (FoodCalendar falls back to a ~12-week window when blank).
+	const foodDates = $derived(
+		[...veganMap.keys(), ...vegetarianMap.keys(), ...sugarMap.keys()].sort()
+	);
+	const calStart = $derived(from || foodDates[0] || '');
+	const calEnd = $derived(to || foodDates[foodDates.length - 1] || '');
+
+	// Metrics already surfaced by the two groups above; anything else registered
+	// still renders below under "Other metrics" so nothing silently disappears.
+	const groupedMetrics = new Set<string>([...SUBSTANCE_METRICS, 'vegan', 'vegetarian']);
+	const otherSeries = $derived(series.filter((s) => !groupedMetrics.has(s.metric)));
 </script>
 
 <div class="stats-page">
@@ -202,54 +265,98 @@
 				daily note's frontmatter (e.g. <code>caffeine: 40@0720</code>).
 			</p>
 		{:else}
-			<div class="charts">
-				{#each series as s (s.metric)}
-					<section class="metric">
-						<div class="metric-head">
-							<span class="metric-label">{s.label}</span>
-							<span class="metric-meta">
-								{#if s.chart === 'boolean'}
-									{s.days.length} day{s.days.length === 1 ? '' : 's'}
-								{:else}
-									{total(s.days)}{s.unit ? ` ${s.unit}` : ''} total · {s.agg}
-								{/if}
-							</span>
-						</div>
+			{#snippet metricChart(s: Series)}
+				<section class="metric">
+					<div class="metric-head">
+						<span class="metric-label">{s.label}</span>
+						<span class="metric-meta">
+							{#if s.chart === 'boolean'}
+								{s.days.length} day{s.days.length === 1 ? '' : 's'}
+							{:else}
+								{total(s.days)}{s.unit ? ` ${s.unit}` : ''} total · {s.agg}
+							{/if}
+						</span>
+					</div>
 
-						{#if s.days.length === 0}
-							<p class="status-line dim">no data in range</p>
-						{:else if s.chart === 'boolean' || s.chart === 'heatmap'}
-							<div class="cells">
-								{#each s.days as d (d.date)}
-									<span class="cell on" title={d.date}></span>
-								{/each}
-							</div>
-						{:else if s.chart === 'bar'}
-							<svg
-								class="chart"
-								viewBox="0 0 {W} {H}"
-								preserveAspectRatio="none"
-								role="img"
-								aria-label={`${s.label} bar chart`}
-							>
-								{#each bars(s.days) as b (b.date)}
-									<rect x={b.x} y={b.y} width={b.w} height={b.h} class="bar" />
-								{/each}
-							</svg>
-						{:else}
-							<svg
-								class="chart"
-								viewBox="0 0 {W} {H}"
-								preserveAspectRatio="none"
-								role="img"
-								aria-label={`${s.label} line chart`}
-							>
-								<path d={linePath(s.days)} class="line" fill="none" />
-							</svg>
-						{/if}
-					</section>
-				{/each}
-			</div>
+					{#if s.days.length === 0}
+						<p class="status-line dim">no data in range</p>
+					{:else if s.chart === 'boolean' || s.chart === 'heatmap'}
+						<div class="cells">
+							{#each s.days as d (d.date)}
+								<span
+									class="cell"
+									class:on={d.value !== 0}
+									title={`${d.date}${d.value === 0 ? ' (off)' : ''}`}
+								></span>
+							{/each}
+						</div>
+					{:else if s.chart === 'bar'}
+						<svg
+							class="chart"
+							viewBox="0 0 {W} {H}"
+							preserveAspectRatio="none"
+							role="img"
+							aria-label={`${s.label} bar chart`}
+						>
+							{#each bars(s.days) as b (b.date)}
+								<rect x={b.x} y={b.y} width={b.w} height={b.h} class="bar" />
+							{/each}
+						</svg>
+					{:else}
+						<svg
+							class="chart"
+							viewBox="0 0 {W} {H}"
+							preserveAspectRatio="none"
+							role="img"
+							aria-label={`${s.label} line chart`}
+						>
+							<path d={linePath(s.days)} class="line" fill="none" />
+						</svg>
+					{/if}
+				</section>
+			{/snippet}
+
+			<!-- Substances: caffeine / alcohol / sugar as their per-metric charts. -->
+			<section class="group">
+				<SectionTitle>Substances</SectionTitle>
+				{#if substanceSeries.length === 0}
+					<p class="status-line dim">
+						no substance data yet — log <code>caffeine</code>, <code>alcohol</code> or
+						<code>sugar</code>
+					</p>
+				{:else}
+					<div class="charts">
+						{#each substanceSeries as s (s.metric)}
+							{@render metricChart(s)}
+						{/each}
+					</div>
+				{/if}
+			</section>
+
+			<!-- Food: GitHub-style calendar (category hue + sugar darkness). -->
+			<section class="group">
+				<SectionTitle>Food</SectionTitle>
+				<p class="status-line dim food-caption">
+					Colour = diet (green vegan · blue vegetarian · red meat); darker = more sugar.
+				</p>
+				<FoodCalendar {veganMap} {vegetarianMap} {sugarMap} start={calStart} end={calEnd} {today} />
+				{#if sugarSeries && sugarSeries.days.length > 0}
+					<div class="charts food-sugar">
+						{@render metricChart(sugarSeries)}
+					</div>
+				{/if}
+			</section>
+
+			{#if otherSeries.length > 0}
+				<section class="group">
+					<SectionTitle>Other metrics</SectionTitle>
+					<div class="charts">
+						{#each otherSeries as s (s.metric)}
+							{@render metricChart(s)}
+						{/each}
+					</div>
+				</section>
+			{/if}
 		{/if}
 
 		<!-- Metric registry management -->
@@ -336,6 +443,19 @@
 		font-family: var(--font-term);
 		font-size: var(--type-meta);
 		color: var(--kv-dim);
+	}
+	.group {
+		margin-bottom: var(--space-7);
+	}
+	.group :global(.section-title) {
+		margin-bottom: var(--space-3);
+	}
+	.food-caption {
+		margin-top: 0;
+		margin-bottom: var(--space-3);
+	}
+	.food-sugar {
+		margin-top: var(--space-4);
 	}
 	.charts {
 		display: flex;
