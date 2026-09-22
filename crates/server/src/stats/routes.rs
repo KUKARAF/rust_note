@@ -184,10 +184,14 @@ async fn list_stats(
         let mut days = Vec::new();
         for (date, stats) in &per_day {
             if def.chart == "boolean" {
-                if day_bool_for(stats, &def.metric) {
+                // Emit a day whenever the key is *present* (tri-state): value 1
+                // when truthy, 0 when present-but-false (e.g. `vegetarian:
+                // false`). Absent days are skipped, so the client can tell a
+                // "meat" day apart from a day with no food data at all.
+                if let Some(truthy) = day_bool_state(stats, &def.metric) {
                     days.push(DayValue {
                         date: date.clone(),
-                        value: 1,
+                        value: i64::from(truthy),
                         points: Vec::new(),
                     });
                 }
@@ -223,16 +227,28 @@ fn numeric_points(stats: &[(String, StatValue)], metric: &str) -> Option<Vec<Sta
         })
 }
 
-/// Parent-any truthiness: true if `metric` is truthy or any `metric.*` present.
-fn day_bool_for(stats: &[(String, StatValue)], metric: &str) -> bool {
+/// Tri-state presence for a boolean/parent metric on a day.
+///
+/// `None` when neither `metric` nor any `metric.*` child is present that day.
+/// `Some(true)` for parent-any truthiness (the key is truthy, or any `metric.*`
+/// child is present). `Some(false)` when the key is present but falsey — e.g. an
+/// explicit `vegetarian: false`. Distinguishing present-false from absent lets
+/// the client render a "meat" day differently from a day with no data.
+fn day_bool_state(stats: &[(String, StatValue)], metric: &str) -> Option<bool> {
     let prefix = format!("{metric}.");
-    stats.iter().any(|(k, v)| {
-        (k == metric || k.starts_with(&prefix))
-            && match v {
+    let mut truthy = false;
+    let mut present = false;
+    for (k, v) in stats {
+        if k == metric || k.starts_with(&prefix) {
+            present = true;
+            let t = match v {
                 StatValue::Bool(b) => *b,
                 StatValue::Nums(p) => !p.is_empty(),
-            }
-    })
+            };
+            truthy = truthy || t;
+        }
+    }
+    present.then_some(truthy)
 }
 
 // ---- POST /api/stats ------------------------------------------------------
@@ -650,6 +666,38 @@ mod tests {
         // Only the day with an exercise.* entry is true.
         assert_eq!(s.days.len(), 1);
         assert_eq!(s.days[0].date, "2026-09-01");
+    }
+
+    #[tokio::test]
+    async fn boolean_metric_distinguishes_present_false_from_absent() {
+        let (state, _n, _d) = test_state().await;
+        // day 1: vegetarian true; day 2: vegetarian false (present); day 3: no
+        // vegetarian key at all.
+        seed(&state, "diary/2026-09-01", "---\nvegetarian: true\n---\n").await;
+        seed(&state, "diary/2026-09-02", "---\nvegetarian: false\n---\n").await;
+        seed(&state, "diary/2026-09-03", "---\nprotein: 60\n---\n").await;
+        register(&state, "vegetarian", "", "boolean", "last").await;
+
+        let resp = list_stats(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            q("2026-09-01", "2026-09-30", None),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        let s = resp
+            .series
+            .iter()
+            .find(|s| s.metric == "vegetarian")
+            .expect("vegetarian series present");
+        // Present days (true + false) are emitted; the absent day is skipped.
+        assert_eq!(s.days.len(), 2);
+        assert_eq!(s.days[0].date, "2026-09-01");
+        assert_eq!(s.days[0].value, 1);
+        assert_eq!(s.days[1].date, "2026-09-02");
+        assert_eq!(s.days[1].value, 0);
     }
 
     #[tokio::test]
