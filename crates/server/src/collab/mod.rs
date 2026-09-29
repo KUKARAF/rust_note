@@ -18,6 +18,7 @@
 pub mod persist;
 pub mod protocol;
 pub mod room;
+pub mod write;
 pub mod ws;
 
 #[cfg(test)]

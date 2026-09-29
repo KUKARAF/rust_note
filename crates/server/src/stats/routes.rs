@@ -1,9 +1,7 @@
 //! HTTP handlers for `/api/stats`.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
-use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::header;
 use axum::response::IntoResponse;
@@ -11,9 +9,6 @@ use axum::routing::{get, put};
 use axum::{Json, Router};
 use axum_extra::extract::WithRejection;
 use serde::{Deserialize, Serialize};
-use yrs::sync::{Message, SyncMessage};
-use yrs::updates::encoder::Encode;
-use yrs::{GetString, ReadTxn, Text, Transact};
 
 use rust_note_core::frontmatter::Frontmatter;
 use rust_note_core::stats::{
@@ -25,7 +20,7 @@ use super::{
     MetricDef, CHART_KINDS,
 };
 use crate::auth::session::RequireAuth;
-use crate::collab::room::{Room, CONTENT_FIELD};
+use crate::collab::write::edit_note_through_room;
 use crate::db_users::commit_author;
 use crate::error::{AppError, AppResult};
 use crate::notes::acl;
@@ -259,22 +254,22 @@ fn day_bool_state(stats: &[(String, StatValue)], metric: &str) -> Option<bool> {
 // ---- POST /api/stats ------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct LogRequest {
-    key: String,
-    value: i64,
+pub(crate) struct LogRequest {
+    pub(crate) key: String,
+    pub(crate) value: i64,
     #[serde(default)]
-    at: Option<String>,
+    pub(crate) at: Option<String>,
     #[serde(default)]
-    date: Option<String>,
+    pub(crate) date: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-struct LogResponse {
+pub(crate) struct LogResponse {
     note_id: String,
     key: String,
 }
 
-async fn log_stat(
+pub(crate) async fn log_stat(
     State(state): State<AppState>,
     RequireAuth(user_id): RequireAuth,
     WithRejection(Json(body), _): WithRejection<Json<LogRequest>, AppError>,
@@ -294,27 +289,32 @@ async fn log_stat(
         }
     };
     let note_id = format!("diary/{date}");
-    let rel_path = note_id_to_path(&note_id);
 
+    // Register (creating an owned note when new) then authorize. On a single-
+    // user deployment the caller always owns their diary note; the explicit
+    // `can_write` guard matters now that MCP is another entry point — a note
+    // owned by a different user must not be written through here.
     acl::ensure_note_registered(&state.db, &note_id, &user_id)
         .await
         .map_err(AppError::Internal)?;
+    if !acl::can_write(&state.db, &note_id, &user_id)
+        .await
+        .map_err(AppError::Internal)?
+    {
+        return Err(AppError::Forbidden);
+    }
 
     // Write through the collab room so a note open in the editor isn't clobbered
-    // by the next flush, and connected editors see the change live.
-    let room = state.rooms.get_or_create(&note_id, &user_id, &state).await;
-    let applied = apply_append(&room, &key, body.value, body.at.as_deref());
-    // Persist synchronously so the daily-note file exists on disk immediately —
-    // otherwise a `GET /api/stats` right after (it scans on-disk notes) would
-    // miss a note that lives only in the room until the debounced flush. Safe
-    // for a note open in the editor: the flush writes the room's own text.
-    if applied {
-        if let Err(err) = crate::collab::persist::flush_room(&room, &state).await {
-            tracing::error!(note_id = %note_id, error = %err, "stats flush failed");
-        }
-    }
-    state.rooms.release(room, state.clone());
-    let _ = rel_path;
+    // by its next flush, and connected editors see the change live; the helper
+    // flushes synchronously so the daily-note file exists on disk immediately
+    // (a `GET /api/stats` right after scans on-disk notes).
+    let key_edit = key.clone();
+    let at = body.at.clone();
+    let value = body.value;
+    let applied = edit_note_through_room(&state, &note_id, &user_id, move |old| {
+        append_stat_entry(old, &key_edit, value, at.as_deref())
+    })
+    .await?;
 
     if applied {
         Ok(Json(LogResponse { note_id, key }))
@@ -324,67 +324,6 @@ async fn log_stat(
                 .to_string(),
         ))
     }
-}
-
-/// Append the entry into the room's CRDT doc (frontmatter-region edit),
-/// broadcast it to connected sockets, and mark the room dirty. Returns false
-/// when the append is refused (bad time / non-numeric existing key).
-fn apply_append(room: &Arc<Room>, key: &str, value: i64, at: Option<&str>) -> bool {
-    let awareness = room.lock_awareness();
-    let doc = awareness.doc();
-    let text = doc.get_or_insert_text(CONTENT_FIELD);
-    let old = text.get_string(&doc.transact());
-    let Some(new) = append_stat_entry(&old, key, value, at) else {
-        return false;
-    };
-    if new == old {
-        return true;
-    }
-    let before_sv = doc.transact().state_vector();
-    {
-        let mut txn = doc.transact_mut();
-        let (p, s) = byte_diff(&old, &new);
-        let del_len = old.len() - s - p;
-        if del_len > 0 {
-            text.remove_range(&mut txn, p as u32, del_len as u32);
-        }
-        let ins = &new[p..new.len() - s];
-        if !ins.is_empty() {
-            text.insert(&mut txn, p as u32, ins);
-        }
-    }
-    let update = doc.transact().encode_state_as_update_v1(&before_sv);
-    drop(awareness);
-
-    let frame = Message::Sync(SyncMessage::Update(update)).encode_v1();
-    room.broadcast_frame(0, Bytes::from(frame)); // origin 0: no real conn uses it
-    room.mark_dirty();
-    true
-}
-
-/// Longest common (prefix, suffix) byte lengths between `old` and `new`,
-/// snapped to char boundaries. The differing middle is `old[p..len-s]` →
-/// `new[p..len-s]`. Offsets are UTF-8 bytes to match the server doc's
-/// `OffsetKind::Bytes`.
-fn byte_diff(old: &str, new: &str) -> (usize, usize) {
-    let (ob, nb) = (old.as_bytes(), new.as_bytes());
-    let max_p = ob.len().min(nb.len());
-    let mut p = 0;
-    while p < max_p && ob.get(p) == nb.get(p) {
-        p += 1;
-    }
-    while p > 0 && !old.is_char_boundary(p) {
-        p -= 1;
-    }
-    let max_s = (ob.len() - p).min(nb.len() - p);
-    let mut s = 0;
-    while s < max_s && ob.get(ob.len() - 1 - s) == nb.get(nb.len() - 1 - s) {
-        s += 1;
-    }
-    while s > 0 && !old.is_char_boundary(ob.len() - s) {
-        s -= 1;
-    }
-    (p, s)
 }
 
 // ---- registry (in the user settings note) ---------------------------------
@@ -411,18 +350,18 @@ pub(crate) async fn get_registry(
 }
 
 #[derive(Debug, Deserialize)]
-struct RegistryUpsert {
+pub(crate) struct RegistryUpsert {
     #[serde(default)]
-    unit: String,
+    pub(crate) unit: String,
     #[serde(default)]
-    label: String,
+    pub(crate) label: String,
     #[serde(default)]
-    chart: String,
+    pub(crate) chart: String,
     #[serde(default)]
-    agg: String,
+    pub(crate) agg: String,
 }
 
-async fn put_registry(
+pub(crate) async fn put_registry(
     State(state): State<AppState>,
     RequireAuth(user_id): RequireAuth,
     Path(metric): Path<String>,
@@ -779,6 +718,38 @@ mod tests {
         let text = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(text.contains("# Stats format"));
         assert!(text.contains("`/api/stats` API"));
+    }
+
+    #[tokio::test]
+    async fn log_denies_a_diary_note_owned_by_another_user() {
+        let (state, _n, _d) = test_state().await;
+        // A diary note already owned by someone else.
+        sqlx::query(
+            "INSERT INTO users (id, email, display_name, created_at) \
+             VALUES ('bob', NULL, NULL, '2026-01-01T00:00:00Z')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        acl::ensure_note_registered(&state.db, "diary/2026-09-01", "bob")
+            .await
+            .unwrap();
+
+        let res = log_stat(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            WithRejection(
+                Json(LogRequest {
+                    key: "caffeine".to_string(),
+                    value: 40,
+                    at: None,
+                    date: Some("2026-09-01".to_string()),
+                }),
+                PhantomData,
+            ),
+        )
+        .await;
+        assert!(matches!(res, Err(AppError::Forbidden)), "got {res:?}");
     }
 
     #[tokio::test]

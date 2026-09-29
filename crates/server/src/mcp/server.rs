@@ -6,8 +6,11 @@
 //! routes use, constructing their axum extractors directly — so the MCP surface
 //! and the HTTP surface share one implementation and one permission model.
 
+use std::marker::PhantomData;
+
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum_extra::extract::WithRejection;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, ContentBlock, ListResourceTemplatesResult, ListResourcesResult,
@@ -21,7 +24,10 @@ use serde_json::json;
 
 use super::auth::AuthUser;
 use crate::auth::session::RequireAuth;
-use crate::error::AppError;
+use crate::collab::write::edit_note_through_room;
+use crate::error::{AppError, AppResult};
+use crate::notes::acl;
+use crate::notes::fs_store::{is_valid_note_id, note_id_to_path};
 use crate::state::AppState;
 
 /// One MCP server instance. A fresh one is built per session by the service
@@ -105,6 +111,60 @@ Query/filter tokens (for the `search_notes`/board style search, applied client-s
 `@loc`, `#tag`, burner names (`fb`/`frontburner`/`bb`/`backburner`/`fridge`/`oven`),
 `p>=N` / `p<=N`, and free text.";
 
+// ---- write helpers --------------------------------------------------------
+
+/// Append `addition` to `old`, ensuring a newline separates them and the result
+/// ends with a newline.
+fn append_markdown(old: &str, addition: &str) -> String {
+    let mut s = old.to_string();
+    if !s.is_empty() && !s.ends_with('\n') {
+        s.push('\n');
+    }
+    s.push_str(addition);
+    if !s.ends_with('\n') {
+        s.push('\n');
+    }
+    s
+}
+
+/// Flip the state char of a markdown checkbox line (`[ ]` ⇄ `[x]`) to the
+/// desired `done` state, preserving everything else. `None` if the line has no
+/// recognizable `[_]` checkbox.
+fn set_checkbox_state(line: &str, done: bool) -> Option<String> {
+    let open = line.find('[')?;
+    let state_idx = open + 1;
+    let close_idx = open + 2;
+    if line.as_bytes().get(close_idx) != Some(&b']') {
+        return None;
+    }
+    let new_state = if done { 'x' } else { ' ' };
+    let mut out = String::with_capacity(line.len());
+    out.push_str(line.get(..state_idx)?);
+    out.push(new_state);
+    out.push_str(line.get(close_idx..)?);
+    Some(out)
+}
+
+/// Locate the target task line and set its checkbox to `done`, returning the new
+/// full document. Prefers the reported `line_hint` (1-based) when it still holds
+/// a matching task, else the first task whose text matches — mirroring the
+/// client's stale-line-tolerant toggle. `None` if no task matches.
+fn toggle_in_text(old: &str, line_hint: Option<u32>, text: &str, done: bool) -> Option<String> {
+    let tasks = rust_note_core::tasks::parse_tasks(old);
+    let query = text.trim();
+    let matches = |t: &rust_note_core::tasks::Task| {
+        t.text.trim() == query || t.text_clean.trim() == query || t.text.contains(query)
+    };
+    let target = line_hint
+        .and_then(|l| tasks.iter().find(|t| t.line == l as usize && matches(t)))
+        .or_else(|| tasks.iter().find(|t| matches(t)))?;
+    let idx = target.line.checked_sub(1)?;
+    let mut lines: Vec<String> = old.split('\n').map(str::to_string).collect();
+    let flipped = set_checkbox_state(lines.get(idx)?, done)?;
+    *lines.get_mut(idx)? = flipped;
+    Some(lines.join("\n"))
+}
+
 // ---- tool argument types --------------------------------------------------
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -141,6 +201,69 @@ struct GetStatsArgs {
     /// boolean "did it happen" series. Omit for the whole registered dashboard.
     #[serde(default)]
     metric: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AppendToNoteArgs {
+    /// Note id to append to (must already exist).
+    id: String,
+    /// Markdown to append at the end of the note.
+    markdown: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RecordStatArgs {
+    /// Metric key, lowercase dotted (e.g. `caffeine`, `exercise.cardio`).
+    key: String,
+    /// Integer value (no floats).
+    value: i64,
+    /// Optional time as `HHMM` (24h), e.g. `0720`.
+    #[serde(default)]
+    at: Option<String>,
+    /// Optional date `YYYY-MM-DD`; defaults to today in the server timezone.
+    #[serde(default)]
+    date: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ToggleTodoArgs {
+    /// The note the task lives in, e.g. `diary/2026-09-29`.
+    note_id: String,
+    /// The task text (raw line text or its cleaned form) — used to locate the
+    /// task even if `line` is stale. Required.
+    text: String,
+    /// Optional 1-based line number hint from a prior `list_todos`.
+    #[serde(default)]
+    line: Option<u32>,
+    /// Desired state: true = done (`[x]`), false = open (`[ ]`).
+    done: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct DefineMetricArgs {
+    /// Metric key to define (lowercase dotted).
+    metric: String,
+    /// Display unit, e.g. `mg`, `min`.
+    #[serde(default)]
+    unit: Option<String>,
+    /// Human label; defaults to the metric key.
+    #[serde(default)]
+    label: Option<String>,
+    /// Chart kind: `line` | `bar` | `boolean` | `heatmap` (defaults to line).
+    #[serde(default)]
+    chart: Option<String>,
+    /// Aggregation: `sum` | `last` | `max` | `min` | `count` (defaults to sum).
+    #[serde(default)]
+    agg: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CreateNoteToolArgs {
+    /// A note id or title; slugified into a note id.
+    id_or_title: String,
+    /// Optional initial markdown content.
+    #[serde(default)]
+    content: Option<String>,
 }
 
 #[tool_router]
@@ -301,6 +424,191 @@ impl McpServer {
         match crate::stats::routes::get_registry(State(self.state.clone()), RequireAuth(user)).await
         {
             Ok(Json(defs)) => json_ok(&defs),
+            Err(e) => Ok(app_error_to_tool(e)),
+        }
+    }
+
+    /// ACL for a content write to an *existing* note: require a valid id, that
+    /// the note exists (adopting an on-disk orphan the app hasn't seen yet), and
+    /// that the caller may write it. Mirrors the REST write path's checks.
+    async fn authorize_write(&self, user: &str, note_id: &str) -> AppResult<()> {
+        if !is_valid_note_id(note_id) {
+            return Err(AppError::BadRequest("invalid note id".to_string()));
+        }
+        let db = &self.state.db;
+        if !acl::note_exists(db, note_id)
+            .await
+            .map_err(AppError::Internal)?
+        {
+            let rel = note_id_to_path(note_id);
+            let on_disk = self
+                .state
+                .notes_repo
+                .read_file(&rel)
+                .map_err(AppError::Internal)?
+                .is_some();
+            if !on_disk {
+                return Err(AppError::NotFound);
+            }
+            acl::adopt_if_orphaned(db, note_id, user)
+                .await
+                .map_err(AppError::Internal)?;
+        }
+        if !acl::can_write(db, note_id, user)
+            .await
+            .map_err(AppError::Internal)?
+        {
+            return Err(AppError::Forbidden);
+        }
+        Ok(())
+    }
+
+    #[tool(
+        description = "Append markdown to the end of an existing note, through its live collab \
+                       room so a note open in the editor isn't clobbered."
+    )]
+    async fn append_to_note(
+        &self,
+        Parameters(args): Parameters<AppendToNoteArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let user = require_user(&ctx)?;
+        if is_settings_id(&args.id) {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "settings notes are not writable via MCP",
+            )]));
+        }
+        if let Err(e) = self.authorize_write(&user, &args.id).await {
+            return Ok(app_error_to_tool(e));
+        }
+        let md = args.markdown;
+        let applied = edit_note_through_room(&self.state, &args.id, &user, move |old| {
+            Some(append_markdown(old, &md))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        if applied {
+            json_ok(&json!({ "id": args.id, "appended": true }))
+        } else {
+            Ok(CallToolResult::error(vec![ContentBlock::text(
+                "append was refused",
+            )]))
+        }
+    }
+
+    #[tool(
+        description = "Record a daily stat value (integer). Optional at:\"HHMM\" and \
+                       date:\"YYYY-MM-DD\" (defaults to today, server timezone). Repeated \
+                       values on a day accumulate. See the stats://docs resource."
+    )]
+    async fn record_stat(
+        &self,
+        Parameters(args): Parameters<RecordStatArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let user = require_user(&ctx)?;
+        let body = crate::stats::routes::LogRequest {
+            key: args.key,
+            value: args.value,
+            at: args.at,
+            date: args.date,
+        };
+        match crate::stats::routes::log_stat(
+            State(self.state.clone()),
+            RequireAuth(user),
+            WithRejection(Json(body), PhantomData),
+        )
+        .await
+        {
+            Ok(Json(resp)) => json_ok(&resp),
+            Err(e) => Ok(app_error_to_tool(e)),
+        }
+    }
+
+    #[tool(
+        description = "Mark a task done or open. Provide the task `text` (and optionally its \
+                       1-based `line`) so it can be located even if the line moved. Writes \
+                       through the collab room."
+    )]
+    async fn toggle_todo(
+        &self,
+        Parameters(args): Parameters<ToggleTodoArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let user = require_user(&ctx)?;
+        if is_settings_id(&args.note_id) {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "settings notes are not writable via MCP",
+            )]));
+        }
+        if let Err(e) = self.authorize_write(&user, &args.note_id).await {
+            return Ok(app_error_to_tool(e));
+        }
+        let (line, text, done) = (args.line, args.text, args.done);
+        let applied = edit_note_through_room(&self.state, &args.note_id, &user, move |old| {
+            toggle_in_text(old, line, &text, done)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        if applied {
+            json_ok(&json!({ "note_id": args.note_id, "done": done }))
+        } else {
+            Ok(CallToolResult::error(vec![ContentBlock::text(
+                "no matching task line was found",
+            )]))
+        }
+    }
+
+    #[tool(
+        description = "Define or update a stat metric's display config so it charts in /stats: \
+                       unit, label, chart (line|bar|boolean|heatmap), agg (sum|last|max|min|count)."
+    )]
+    async fn define_metric(
+        &self,
+        Parameters(args): Parameters<DefineMetricArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let user = require_user(&ctx)?;
+        let body = crate::stats::routes::RegistryUpsert {
+            unit: args.unit.unwrap_or_default(),
+            label: args.label.unwrap_or_default(),
+            chart: args.chart.unwrap_or_default(),
+            agg: args.agg.unwrap_or_default(),
+        };
+        match crate::stats::routes::put_registry(
+            State(self.state.clone()),
+            RequireAuth(user),
+            Path(args.metric),
+            WithRejection(Json(body), PhantomData),
+        )
+        .await
+        {
+            Ok(Json(def)) => json_ok(&def),
+            Err(e) => Ok(app_error_to_tool(e)),
+        }
+    }
+
+    #[tool(
+        description = "Create a new note from an id or title (slugified). Fails if it already exists."
+    )]
+    async fn create_note(
+        &self,
+        Parameters(args): Parameters<CreateNoteToolArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let user = require_user(&ctx)?;
+        let body = crate::notes::routes::CreateNoteRequest {
+            id_or_title: args.id_or_title,
+            content: args.content,
+        };
+        match crate::notes::routes::create_note(
+            State(self.state.clone()),
+            RequireAuth(user),
+            WithRejection(Json(body), PhantomData),
+        )
+        .await
+        {
+            Ok(Json(meta)) => json_ok(&meta),
             Err(e) => Ok(app_error_to_tool(e)),
         }
     }
@@ -468,5 +776,104 @@ mod tests {
             !ids.iter().any(|id| id.starts_with("_settings")),
             "settings notes must be excluded, got {ids:?}"
         );
+    }
+
+    #[test]
+    fn append_markdown_adds_separator_and_trailing_newline() {
+        assert_eq!(append_markdown("a", "b"), "a\nb\n");
+        assert_eq!(append_markdown("a\n", "b\n"), "a\nb\n");
+        assert_eq!(append_markdown("", "b"), "b\n");
+    }
+
+    #[test]
+    fn set_checkbox_state_flips_marker() {
+        assert_eq!(set_checkbox_state("- [ ] x", true).unwrap(), "- [x] x");
+        assert_eq!(set_checkbox_state("- [x] x", false).unwrap(), "- [ ] x");
+        assert!(set_checkbox_state("no checkbox here", true).is_none());
+    }
+
+    #[test]
+    fn toggle_in_text_locates_and_flips() {
+        let doc = "# Day\n- [ ] water plants\n- [ ] book flights #fb\n";
+        // by text + correct line hint
+        let out = toggle_in_text(doc, Some(2), "water plants", true).expect("match");
+        assert!(out.contains("- [x] water plants"));
+        assert!(out.contains("- [ ] book flights"));
+        // idempotent when already in the desired state
+        assert_eq!(
+            toggle_in_text(&out, None, "water plants", true).unwrap(),
+            out
+        );
+        // reopen
+        assert!(toggle_in_text(&out, None, "water plants", false)
+            .unwrap()
+            .contains("- [ ] water plants"));
+        // stale line hint falls back to a text match (text_clean form)
+        assert!(toggle_in_text(doc, Some(99), "book flights", true)
+            .unwrap()
+            .contains("- [x] book flights"));
+        // no match refuses
+        assert!(toggle_in_text(doc, None, "nonexistent task", true).is_none());
+    }
+
+    #[tokio::test]
+    async fn append_through_room_lands_on_disk() {
+        let (server, _n, _d) = test_server().await;
+        let rel = note_id_to_path("notes/foo");
+        acl::ensure_note_registered(&server.state.db, "notes/foo", "alice")
+            .await
+            .unwrap();
+        server
+            .state
+            .notes_repo
+            .write_and_commit(&rel, "# Foo\n", "alice", "a@e", "seed")
+            .await
+            .unwrap();
+
+        server.authorize_write("alice", "notes/foo").await.unwrap();
+        let applied = edit_note_through_room(&server.state, "notes/foo", "alice", |old| {
+            Some(append_markdown(old, "appended line"))
+        })
+        .await
+        .unwrap();
+        assert!(applied);
+
+        let text = server.state.notes_repo.read_file(&rel).unwrap().unwrap();
+        assert!(text.contains("# Foo"), "original kept: {text:?}");
+        assert!(text.contains("appended line"), "append landed: {text:?}");
+    }
+
+    #[tokio::test]
+    async fn authorize_write_denies_another_users_note() {
+        let (server, _n, _d) = test_server().await;
+        sqlx::query(
+            "INSERT INTO users (id, email, display_name, created_at) \
+             VALUES ('bob', NULL, NULL, '2026-01-01T00:00:00Z')",
+        )
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+        let rel = note_id_to_path("notes/bob-note");
+        acl::ensure_note_registered(&server.state.db, "notes/bob-note", "bob")
+            .await
+            .unwrap();
+        server
+            .state
+            .notes_repo
+            .write_and_commit(&rel, "secret\n", "bob", "b@e", "seed")
+            .await
+            .unwrap();
+
+        let res = server.authorize_write("alice", "notes/bob-note").await;
+        assert!(matches!(res, Err(AppError::Forbidden)), "got {res:?}");
+    }
+
+    #[tokio::test]
+    async fn authorize_write_missing_note_is_not_found() {
+        let (server, _n, _d) = test_server().await;
+        let res = server
+            .authorize_write("alice", "notes/does-not-exist")
+            .await;
+        assert!(matches!(res, Err(AppError::NotFound)), "got {res:?}");
     }
 }

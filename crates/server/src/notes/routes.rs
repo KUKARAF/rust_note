@@ -352,12 +352,12 @@ async fn write_note(
 // ---- POST /api/notes -----------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct CreateNoteRequest {
-    id_or_title: String,
-    content: Option<String>,
+pub(crate) struct CreateNoteRequest {
+    pub(crate) id_or_title: String,
+    pub(crate) content: Option<String>,
 }
 
-async fn create_note(
+pub(crate) async fn create_note(
     State(state): State<AppState>,
     RequireAuth(user_id): RequireAuth,
     WithRejection(Json(body), _): WithRejection<Json<CreateNoteRequest>, AppError>,
