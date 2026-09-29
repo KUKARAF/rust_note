@@ -1,7 +1,8 @@
 <script lang="ts">
-	// Aggregated todo board. Static-shaped route → client-side fetch on mount
-	// (same pattern as /notes). Reads come from GET /api/todos; toggling a
-	// checkbox writes back through the collab CRDT (see $lib/notes/todoToggle).
+	// Aggregated todo board — Todoist-calm redesign. One search/command bar plus a
+	// Display popover (grouping/sort/show); no persistent filter pills. Color is
+	// rationed to priority (checkbox ring / group dot) and the spoiling cue.
+	// Reads come from GET /api/todos; toggling writes back through the collab CRDT.
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
@@ -14,13 +15,17 @@
 	import SectionTitle from '$lib/design/SectionTitle.svelte';
 	import {
 		applyQuery,
+		parseSearch,
 		ageInDays,
 		isSpoiling,
-		BURNER_META,
+		relativeDate,
+		BURNER_COLOR,
 		type Todo,
 		type QuerySpec,
 		type SortField,
-		type Burner
+		type SortKey,
+		type StatusFilter,
+		type GroupMode
 	} from '$lib/notes/todos';
 	import { setTodoDone, collabUserFrom } from '$lib/notes/todoToggle';
 
@@ -29,22 +34,28 @@
 	let todos = $state<Todo[]>([]);
 	let loading = $state(true);
 	let loadError = $state<string | null>(null);
-	let spec = $state<QuerySpec>({ status: 'all' });
-	// Free-text filter, kept separate so it can bind to the Input (which needs a
-	// plain string). Folded into the spec via `effectiveSpec`.
-	let textFilter = $state('');
-
-	// AI natural-language query box.
-	let nl = $state('');
-	let asking = $state(false);
-	let aiError = $state<string | null>(null);
 	let toggleError = $state<string | null>(null);
 
-	const effectiveSpec = $derived<QuerySpec>({
-		...spec,
-		text: textFilter.trim() === '' ? undefined : textFilter.trim()
-	});
-	const result = $derived(applyQuery(todos, effectiveSpec, now));
+	// The single search/command bar: free text plus literal tokens (@loc, #tag,
+	// burner names, p>=N / p<=N), parsed by `parseSearch`. The AI query writes
+	// its result back into this same bar as tokens, so there is one source of
+	// truth and the two paths can't fight.
+	let search = $state('');
+	let asking = $state(false);
+	let aiError = $state<string | null>(null);
+
+	// Display popover — grouping, sort and completed-visibility live here, off the
+	// resting canvas. Default: group by burner, show open only (done hidden).
+	let displayOpen = $state(false);
+	let groupMode = $state<GroupMode>('burner');
+	let status = $state<StatusFilter>('open');
+	let sort = $state<SortKey[] | undefined>(undefined);
+
+	const effectiveSpec = $derived<QuerySpec>({ ...parseSearch(search), status, sort });
+	const result = $derived(applyQuery(todos, effectiveSpec, now, groupMode));
+
+	/** True when anything is narrowing the view (so we offer a clear affordance). */
+	const filtered = $derived(search.trim() !== '' || status !== 'open' || sort != null);
 
 	const SORTS: { field: SortField; label: string; defaultDir: 'asc' | 'desc' }[] = [
 		{ field: 'date', label: 'Date', defaultDir: 'desc' },
@@ -52,44 +63,36 @@
 		{ field: 'start', label: 'Start', defaultDir: 'asc' },
 		{ field: 'due', label: 'Due', defaultDir: 'asc' }
 	];
-
-	const activeSort = $derived(spec.sort?.[0]);
+	const activeSort = $derived(sort?.[0]);
 
 	function setSort(field: SortField, defaultDir: 'asc' | 'desc') {
-		const cur = spec.sort?.[0];
-		if (cur?.field === field) {
-			spec.sort = [{ field, dir: cur.dir === 'asc' ? 'desc' : 'asc' }];
-		} else {
-			spec.sort = [{ field, dir: defaultDir }];
-		}
+		const cur = sort?.[0];
+		sort =
+			cur?.field === field
+				? [{ field, dir: cur.dir === 'asc' ? 'desc' : 'asc' }]
+				: [{ field, dir: defaultDir }];
 	}
 
-	function toggleBurner(b: Burner) {
-		const current = spec.burners ?? [];
-		const next = current.includes(b) ? current.filter((x) => x !== b) : [...current, b];
-		spec.burners = next.length ? next : undefined;
+	function ringColor(t: Todo): string {
+		return t.burner ? BURNER_COLOR[t.burner] : 'none';
 	}
 
-	// Locations are an open vocabulary discovered from the loaded todos, so the
-	// filter offers exactly the contexts in use (sorted), not a fixed list.
-	const availableLocations = $derived(
-		[...new Set(todos.flatMap((t) => t.locations))].sort((a, b) => a.localeCompare(b))
-	);
-
-	function toggleLocation(l: string) {
-		const current = spec.locations ?? [];
-		const next = current.includes(l) ? current.filter((x) => x !== l) : [...current, l];
-		spec.locations = next.length ? next : undefined;
+	/** Render a spec back into search-bar tokens (the AI's answer becomes editable text). */
+	function specToSearch(s: QuerySpec): string {
+		const parts: string[] = [];
+		for (const b of s.burners ?? []) parts.push(b);
+		for (const t of s.tags ?? []) parts.push(`#${t}`);
+		for (const l of s.locations ?? []) parts.push(`@${l}`);
+		if (s.pomodorosMin != null) parts.push(`p>=${s.pomodorosMin}`);
+		if (s.pomodorosMax != null) parts.push(`p<=${s.pomodorosMax}`);
+		if (s.text) parts.push(s.text);
+		return parts.join(' ');
 	}
 
-	function setStatus(status: 'open' | 'all' | 'done') {
-		spec.status = status;
-	}
-
-	function resetSpec() {
-		spec = { status: 'all' };
-		textFilter = '';
-		nl = '';
+	function clearAll() {
+		search = '';
+		status = 'open';
+		sort = undefined;
 		aiError = null;
 	}
 
@@ -119,14 +122,16 @@
 	});
 
 	async function runQuery() {
-		if (nl.trim() === '') return;
+		const q = search.trim();
+		if (q === '') return;
 		asking = true;
 		aiError = null;
 		try {
-			const produced = await apiPost<QuerySpec>('/api/todos/query', { nl: nl.trim() });
-			// Preserve nothing from the old spec — the LLM produces a full one.
-			spec = produced ?? { status: 'all' };
-			textFilter = produced?.text ?? '';
+			const produced = await apiPost<QuerySpec>('/api/todos/query', { nl: q });
+			// Fold the AI's answer back into the one search bar (editable tokens).
+			search = specToSearch(produced ?? {});
+			if (produced?.status) status = produced.status;
+			if (produced?.sort) sort = produced.sort;
 		} catch (err) {
 			if (err instanceof ApiError && err.status === 400) {
 				aiError = 'Add an OpenRouter API key in Settings to use natural-language queries.';
@@ -161,39 +166,6 @@
 	function openNote(todo: Todo) {
 		void goto(resolve(`/notes/${encodeNotePath(todo.note_id)}`));
 	}
-
-	// Editable summary of the active query, so the AI/button state is visible
-	// and each facet can be cleared individually.
-	interface Facet {
-		label: string;
-		clear: () => void;
-	}
-	const facets = $derived.by<Facet[]>(() => {
-		const out: Facet[] = [];
-		if (textFilter.trim())
-			out.push({ label: `text: "${textFilter.trim()}"`, clear: () => (textFilter = '') });
-		for (const b of spec.burners ?? [])
-			out.push({ label: BURNER_META[b].label, clear: () => toggleBurner(b) });
-		for (const t of spec.tags ?? [])
-			out.push({
-				label: `#${t}`,
-				clear: () => (spec.tags = (spec.tags ?? []).filter((x) => x !== t))
-			});
-		for (const l of spec.locations ?? [])
-			out.push({ label: `@${l}`, clear: () => toggleLocation(l) });
-		if (spec.status && spec.status !== 'all')
-			out.push({ label: spec.status, clear: () => (spec.status = 'all') });
-		if (spec.pomodorosMin != null)
-			out.push({ label: `≥${spec.pomodorosMin}p`, clear: () => (spec.pomodorosMin = undefined) });
-		if (spec.pomodorosMax != null)
-			out.push({ label: `≤${spec.pomodorosMax}p`, clear: () => (spec.pomodorosMax = undefined) });
-		if (spec.sort?.[0])
-			out.push({
-				label: `sort ${spec.sort[0].field} ${spec.sort[0].dir === 'asc' ? '↑' : '↓'}`,
-				clear: () => (spec.sort = undefined)
-			});
-		return out;
-	});
 </script>
 
 <div class="todo-page">
@@ -206,88 +178,63 @@
 			</div>
 		</div>
 
-		<!-- Natural-language query -->
-		<div class="ai-row">
-			<Input type="text" placeholder="Ask: “fridge stuff, most pomodoros first”…" bind:value={nl}>
-				{#snippet prefix()}✦{/snippet}
-			</Input>
-			<Button variant="primary" size="sm" onclick={runQuery} disabled={asking || nl.trim() === ''}>
-				{asking ? 'Asking…' : 'Ask'}
+		<!-- One search/command bar + a Display button. No persistent filter pills. -->
+		<div class="toolbar">
+			<div class="search">
+				<Input type="text" placeholder="Search or filter — try “fridge @home p>=2”…" bind:value={search}>
+					{#snippet prefix()}/{/snippet}
+				</Input>
+			</div>
+			{#if filtered}
+				<button type="button" class="display-btn" aria-label="Clear filters" onclick={clearAll}>✕</button>
+			{/if}
+			<Button
+				variant="outline"
+				size="sm"
+				onclick={runQuery}
+				disabled={asking || search.trim() === ''}
+			>
+				{asking ? '…' : '✦ Ask'}
 			</Button>
+			<button
+				type="button"
+				class="display-btn"
+				class:active={displayOpen}
+				aria-label="Display options"
+				onclick={() => (displayOpen = !displayOpen)}>⚙</button
+			>
 		</div>
+
 		{#if aiError}
 			<p class="status-line error">{aiError}</p>
 		{/if}
 
-		<!-- Manual controls -->
-		<div class="controls">
-			<div class="control-group">
-				<span class="control-label">sort</span>
-				{#each SORTS as s (s.field)}
-					<button
-						type="button"
-						class="pill"
-						class:active={activeSort?.field === s.field}
-						onclick={() => setSort(s.field, s.defaultDir)}
-					>
-						{s.label}{activeSort?.field === s.field ? (activeSort.dir === 'asc' ? ' ↑' : ' ↓') : ''}
-					</button>
-				{/each}
-			</div>
-
-			<div class="control-group">
-				<span class="control-label">show</span>
-				{#each ['open', 'all', 'done'] as const as st (st)}
-					<button
-						type="button"
-						class="pill"
-						class:active={(spec.status ?? 'all') === st}
-						onclick={() => setStatus(st)}>{st}</button
-					>
-				{/each}
-			</div>
-
-			<div class="control-group">
-				<span class="control-label">burner</span>
-				{#each ['frontburner', 'backburner', 'fridge', 'oven'] as const as b (b)}
-					<button
-						type="button"
-						class="pill"
-						class:active={spec.burners?.includes(b)}
-						onclick={() => toggleBurner(b)}>{BURNER_META[b].glyph} {BURNER_META[b].label}</button
-					>
-				{/each}
-			</div>
-
-			{#if availableLocations.length > 0}
-				<div class="control-group">
-					<span class="control-label">location</span>
-					{#each availableLocations as loc (loc)}
+		{#if displayOpen}
+			<div class="display-panel">
+				<div class="display-row">
+					<span class="display-label">group</span>
+					<button class="pill" class:active={groupMode === 'burner'} onclick={() => (groupMode = 'burner')}>Burner</button>
+					<button class="pill" class:active={groupMode === 'date'} onclick={() => (groupMode = 'date')}>Date</button>
+				</div>
+				<div class="display-row">
+					<span class="display-label">sort</span>
+					{#each SORTS as s (s.field)}
 						<button
-							type="button"
 							class="pill"
-							class:active={spec.locations?.includes(loc)}
-							onclick={() => toggleLocation(loc)}>@{loc}</button
+							class:active={activeSort?.field === s.field}
+							onclick={() => setSort(s.field, s.defaultDir)}
 						>
+							{s.label}{activeSort?.field === s.field ? (activeSort.dir === 'asc' ? ' ↑' : ' ↓') : ''}
+						</button>
+					{/each}
+					{#if sort}<button class="pill clear" onclick={() => (sort = undefined)}>default</button>{/if}
+				</div>
+				<div class="display-row">
+					<span class="display-label">show</span>
+					{#each ['open', 'all', 'done'] as const as st (st)}
+						<button class="pill" class:active={status === st} onclick={() => (status = st)}>{st}</button>
 					{/each}
 				</div>
-			{/if}
-
-			<div class="control-group filter-input">
-				<Input type="text" placeholder="filter text…" bind:value={textFilter}>
-					{#snippet prefix()}/{/snippet}
-				</Input>
-			</div>
-		</div>
-
-		{#if facets.length > 0}
-			<div class="facets">
-				{#each facets as f (f.label)}
-					<button type="button" class="facet" onclick={f.clear} title="remove">
-						{f.label} ✕
-					</button>
-				{/each}
-				<button type="button" class="facet reset" onclick={resetSpec}>reset</button>
 			</div>
 		{/if}
 
@@ -295,50 +242,47 @@
 			<p class="status-line error">{toggleError}</p>
 		{/if}
 
-		<!-- Board -->
 		{#if loading}
-			<p class="status-line">Loading todos…</p>
+			<p class="status-line">Loading…</p>
 		{:else if loadError}
 			<p class="status-line error">{loadError}</p>
-		{:else if todos.length === 0}
-			<p class="status-line">No tasks found in your daily notes yet.</p>
-		{:else if result.groups.length === 0}
-			<p class="status-line">No tasks match the current query.</p>
+		{:else if result.total === 0}
+			<p class="empty">
+				{todos.length === 0 ? 'Nothing on the stove. 🍳' : 'No tasks match — clear the search?'}
+			</p>
 		{:else}
-			{#each result.groups as group (group.burner)}
-				<section class="burner">
-					<header class="burner-head burner-{group.meta.color}">
-						<span class="burner-glyph">{group.meta.glyph}</span>
-						<span class="burner-name">{group.meta.label}</span>
-						<span class="burner-hint">{group.meta.hint}</span>
-						<span class="burner-count">{group.openCount}</span>
-					</header>
-					<ul class="todo-list">
-						{#each group.todos as todo (todo.note_id + ':' + todo.line)}
-							<li class="todo-row" class:done={todo.done} style="--depth: {todo.depth};">
+			{#each result.groups as g (g.key)}
+				<section class="group">
+					<div class="group-head">
+						<span class="dot c-{g.color}"></span>
+						<span class="group-name">{g.label}</span>
+						{#if g.hint}<span class="group-hint">{g.hint}</span>{/if}
+						<span class="group-count">{g.openCount}</span>
+					</div>
+					<ul class="rows">
+						{#each g.todos as todo (todo.note_id + ':' + todo.line)}
+							<li class="row-item" class:done={todo.done} style="--depth: {todo.depth};">
 								<button
 									type="button"
-									class="check"
+									class="check c-{ringColor(todo)}"
 									class:checked={todo.done}
 									aria-label={todo.done ? 'Mark not done' : 'Mark done'}
 									onclick={() => toggle(todo)}
 								>
 									{todo.done ? '✓' : ''}
 								</button>
-								<button type="button" class="todo-text" onclick={() => openNote(todo)}>
-									<span class="text">{todo.text_clean || '(empty task)'}</span>
+								<button type="button" class="task" onclick={() => openNote(todo)}>
+									<span class="title">{todo.text_clean || '(empty task)'}</span>
 									<span class="meta">
-										{#if todo.pomodoros != null}<span class="tag pom">{todo.pomodoros}p</span>{/if}
-										{#if todo.start}<span class="tag">@{todo.start}</span>{/if}
-										{#if todo.due}<span class="tag due">due:{todo.due}</span>{/if}
-										{#if todo.tags.length}<span class="tag hash">#{todo.tags.join(' #')}</span>{/if}
-										{#if todo.locations.length}<span class="tag loc"
-												>@{todo.locations.join(' @')}</span
+										{#if todo.due}<span class="m">{todo.due}</span>{/if}
+										{#if todo.start}<span class="m">{todo.start}</span>{/if}
+										{#if todo.pomodoros != null}<span class="m">{todo.pomodoros}p</span>{/if}
+										{#if todo.tags.length}<span class="m">#{todo.tags.join(' #')}</span>{/if}
+										{#if todo.locations.length}<span class="m">@{todo.locations.join(' @')}</span>{/if}
+										{#if isSpoiling(todo, now)}<span class="m spoiling"
+												>spoils · {ageInDays(todo.date, now)}d</span
 											>{/if}
-										{#if isSpoiling(todo, now)}<span class="tag spoiling"
-												>spoiling · {ageInDays(todo.date, now)}d</span
-											>{/if}
-										<span class="tag src">{todo.date ?? todo.note_id}</span>
+										<span class="src">{relativeDate(todo.date, now) || todo.note_id}</span>
 									</span>
 								</button>
 							</li>
@@ -356,196 +300,182 @@
 		margin: 0 auto;
 	}
 
-	:global(.todo-card) {
-		display: flex;
-		flex-direction: column;
-	}
-
 	.todo-header {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: var(--space-6);
-		margin-bottom: var(--space-5);
+		margin-bottom: var(--space-4);
 	}
-
 	.header-actions {
 		display: flex;
 		align-items: center;
-		gap: var(--space-4);
+		gap: var(--space-3);
 	}
-
 	.count {
 		font-family: var(--font-term);
 		font-size: var(--type-meta);
 		color: var(--kv-dim);
 	}
 
-	.ai-row {
-		display: flex;
-		gap: var(--space-4);
-		align-items: stretch;
-		margin-bottom: var(--space-4);
-	}
-
-	.ai-row :global(.kv-input-wrap),
-	.filter-input {
-		flex: 1 1 auto;
-	}
-
-	.controls {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-5);
-		align-items: center;
-		margin-bottom: var(--space-4);
-	}
-
-	.control-group {
+	/* Toolbar: one search bar + Ask + Display. */
+	.toolbar {
 		display: flex;
 		align-items: center;
 		gap: var(--space-2);
-		flex-wrap: wrap;
+		margin-bottom: var(--space-3);
 	}
-
-	.control-label {
-		font-family: var(--font-pixel);
-		font-size: var(--type-chip);
-		text-transform: uppercase;
-		letter-spacing: var(--tracking-pixel);
+	.search {
+		flex: 1;
+		min-width: 0;
+	}
+	.display-btn {
+		flex: none;
+		width: var(--tap-target);
+		height: var(--tap-target);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--surface-input);
 		color: var(--kv-dim);
-		margin-right: var(--space-2);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-control);
+		cursor: pointer;
+		font-size: var(--type-body);
+	}
+	.display-btn.active,
+	.display-btn:hover {
+		color: var(--kv-accent);
+		border-color: var(--border-accent);
 	}
 
+	/* Display popover. */
+	.display-panel {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+		padding: var(--space-3);
+		margin-bottom: var(--space-3);
+		background: var(--surface-raised);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-control);
+	}
+	.display-row {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--space-2);
+	}
+	.display-label {
+		font-family: var(--font-pixel);
+		font-size: var(--type-label);
+		letter-spacing: var(--tracking-pixel);
+		text-transform: uppercase;
+		color: var(--kv-dim);
+		width: 3.5rem;
+	}
 	.pill {
+		font-family: var(--font-term);
+		font-size: var(--type-meta);
+		color: var(--kv-dim);
 		background: transparent;
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-control);
-		color: var(--kv-dim);
-		font-family: var(--font-term);
-		font-size: var(--type-meta);
-		padding: 3px 8px;
+		padding: 2px 8px;
 		cursor: pointer;
-		transition:
-			border-color 120ms linear,
-			color 120ms linear;
 	}
-
 	.pill:hover {
 		color: var(--kv-ink);
-		border-color: var(--kv-accent);
 	}
-
 	.pill.active {
 		color: var(--kv-accent);
-		border-color: var(--kv-accent);
-		background: rgba(121, 242, 121, 0.08);
+		border-color: var(--border-accent);
+	}
+	.pill.clear {
+		color: var(--kv-faint);
 	}
 
-	.facets {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-		margin-bottom: var(--space-5);
-	}
-
-	.facet {
-		background: rgba(121, 242, 121, 0.08);
-		border: 1px solid var(--border-accent);
-		border-radius: var(--radius-control);
-		color: var(--kv-ink);
-		font-family: var(--font-term);
-		font-size: var(--type-meta);
-		padding: 2px 7px;
-		cursor: pointer;
-	}
-
-	.facet.reset {
-		background: transparent;
-		border-color: var(--border-default);
-		color: var(--kv-dim);
-	}
-
-	.burner {
+	/* Quiet group header: colored dot + gray label + hint + count. */
+	.group {
 		margin-top: var(--space-5);
 	}
-
-	.burner-head {
+	.group-head {
 		display: flex;
-		align-items: baseline;
-		gap: var(--space-3);
-		padding: var(--space-3) 0;
+		align-items: center;
+		gap: var(--space-2);
+		padding-bottom: var(--space-2);
 		border-bottom: 1px solid var(--border-default);
 	}
-
-	.burner-glyph {
-		font-size: var(--type-body);
+	.group-name {
+		font-family: var(--font-term);
+		font-size: var(--type-data);
+		color: var(--kv-ink);
 	}
-
-	.burner-name {
-		font-family: var(--font-pixel);
-		font-size: var(--type-label);
-		text-transform: uppercase;
-		letter-spacing: var(--tracking-pixel);
-	}
-
-	.burner-hint {
+	.group-hint {
 		font-family: var(--font-term);
 		font-size: var(--type-meta);
-		color: var(--kv-dim);
-		flex: 1 1 auto;
+		color: var(--kv-faint);
 	}
-
-	.burner-count {
+	.group-count {
+		margin-left: auto;
 		font-family: var(--font-term);
 		font-size: var(--type-meta);
 		color: var(--kv-dim);
 	}
 
-	.burner-danger .burner-glyph,
-	.burner-danger .burner-name {
-		color: var(--kv-danger);
+	/* Priority color lives ONLY here (dot + ring). */
+	.c-danger {
+		--c: var(--kv-danger);
 	}
-	.burner-orange .burner-glyph,
-	.burner-orange .burner-name {
-		color: var(--kv-orange);
+	.c-orange {
+		--c: var(--kv-orange);
 	}
-	.burner-accent .burner-glyph,
-	.burner-accent .burner-name {
-		color: var(--kv-accent);
+	.c-accent {
+		--c: var(--kv-accent);
 	}
-	.burner-dim .burner-glyph,
-	.burner-dim .burner-name {
-		color: var(--kv-dim);
+	.c-blue {
+		--c: var(--kv-blue);
+	}
+	.c-dim {
+		--c: var(--kv-dim);
+	}
+	.c-none {
+		--c: var(--kv-faint);
+	}
+	.dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--c);
+		flex: none;
 	}
 
-	.todo-list {
+	.rows {
 		list-style: none;
 		margin: 0;
 		padding: 0;
 	}
-
-	.todo-row {
+	.row-item {
 		display: flex;
 		align-items: flex-start;
 		gap: var(--space-3);
-		padding: var(--space-3) 0 var(--space-3) calc(var(--depth) * var(--space-6));
-		border-bottom: 1px solid var(--border-default);
+		padding: var(--space-3) 0;
+		padding-left: calc(var(--depth, 0) * var(--space-4));
+		border-bottom: 1px solid var(--kv-faint);
 	}
-
-	.todo-row.done {
+	.row-item.done {
 		opacity: 0.5;
 	}
 
+	/* Circular checkbox — the priority carrier. */
 	.check {
-		flex: 0 0 auto;
-		width: 18px;
-		height: 18px;
-		margin-top: 2px;
-		background: var(--surface-input);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-control);
-		color: var(--kv-accent-ink);
+		flex: none;
+		width: 20px;
+		height: 20px;
+		margin-top: 1px;
+		border-radius: 50%;
+		border: 2px solid var(--c);
+		background: color-mix(in srgb, var(--c) 12%, transparent);
+		color: var(--kv-bg);
 		font-size: 12px;
 		line-height: 1;
 		display: flex;
@@ -553,65 +483,50 @@
 		justify-content: center;
 		cursor: pointer;
 	}
-
 	.check.checked {
-		background: var(--kv-accent);
-		border-color: var(--kv-accent);
+		background: var(--c);
 	}
 
-	.todo-text {
-		flex: 1 1 auto;
+	.task {
+		flex: 1;
 		min-width: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 3px;
-		background: transparent;
+		gap: 2px;
+		background: none;
 		border: none;
+		padding: 0;
 		text-align: left;
 		cursor: pointer;
-		padding: 0;
-		font: inherit;
 	}
-
-	.todo-row.done .text {
-		text-decoration: line-through;
-	}
-
-	.text {
+	.title {
 		font-family: var(--font-term);
 		font-size: var(--type-data);
 		color: var(--kv-ink);
 	}
+	.row-item.done .title {
+		text-decoration: line-through;
+	}
 
+	/* One quiet meta line: neutral gray, color only for the spoiling cue. */
 	.meta {
 		display: flex;
 		flex-wrap: wrap;
+		align-items: baseline;
 		gap: var(--space-2);
-	}
-
-	.tag {
 		font-family: var(--font-term);
 		font-size: var(--type-meta);
+	}
+	.m {
 		color: var(--kv-dim);
 	}
-
-	.tag.pom {
-		color: var(--kv-orange);
-	}
-	.tag.due {
+	.m.spoiling {
 		color: var(--kv-danger);
 	}
-	.tag.hash {
-		color: var(--kv-accent);
-	}
-	.tag.loc {
-		color: var(--kv-blue, var(--kv-accent));
-	}
-	.tag.spoiling {
-		color: var(--kv-danger);
-	}
-	.tag.src {
+	.src {
+		margin-left: auto;
 		color: var(--kv-faint);
+		padding-left: var(--space-3);
 	}
 
 	.status-line {
@@ -619,8 +534,14 @@
 		font-size: var(--type-body);
 		color: var(--kv-dim);
 	}
-
 	.status-line.error {
 		color: var(--kv-danger);
+	}
+	.empty {
+		font-family: var(--font-term);
+		font-size: var(--type-body);
+		color: var(--kv-dim);
+		text-align: center;
+		padding: var(--space-8) 0;
 	}
 </style>

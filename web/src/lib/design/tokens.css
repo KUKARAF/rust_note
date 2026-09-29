@@ -37,6 +37,8 @@
 	--kv-orange-ink: #1a0f00;
 	--kv-danger: #ff6b6b;
 	--kv-danger-ink: #1a0000;
+	/* Cool phosphor accent — used for the fridge priority ring (parked/"cold"). */
+	--kv-blue: #5fb0e6;
 
 	--kv-ink: #e6f0e6;
 	--kv-dim: #728c72;

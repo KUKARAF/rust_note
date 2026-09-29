@@ -60,8 +60,87 @@ export interface QuerySpec {
 	sort?: SortKey[];
 }
 
+/** Map a search token to a burner (short or long form), else null. */
+function burnerFromToken(tok: string): Burner | null {
+	switch (tok.toLowerCase()) {
+		case 'fb':
+		case 'frontburner':
+			return 'frontburner';
+		case 'bb':
+		case 'backburner':
+			return 'backburner';
+		case 'fridge':
+			return 'fridge';
+		case 'oven':
+			return 'oven';
+		default:
+			return null;
+	}
+}
+
+/**
+ * Parse the single search bar into filter fields, so power users can type
+ * `fridge @home p>=2 export` instead of hunting through controls. Recognized
+ * tokens: `#tag`, `@location`, a burner name (`fb`/`frontburner`/`bb`/
+ * `backburner`/`fridge`/`oven`), and `p>=N` / `p<=N`. Everything else is free
+ * text. Status and sort live in the Display popover, not here.
+ */
+export function parseSearch(query: string): QuerySpec {
+	const spec: QuerySpec = {};
+	const words: string[] = [];
+	const tags: string[] = [];
+	const locations: string[] = [];
+	const burners: Burner[] = [];
+	for (const raw of query.split(/\s+/)) {
+		const tok = raw.trim();
+		if (tok === '') continue;
+		if (tok.length > 1 && tok.startsWith('#')) {
+			tags.push(tok.slice(1).toLowerCase());
+			continue;
+		}
+		if (tok.length > 1 && tok.startsWith('@')) {
+			locations.push(tok.slice(1).toLowerCase());
+			continue;
+		}
+		const b = burnerFromToken(tok);
+		if (b) {
+			if (!burners.includes(b)) burners.push(b);
+			continue;
+		}
+		const ge = /^p>=(\d+)$/.exec(tok);
+		if (ge) {
+			spec.pomodorosMin = Number(ge[1]);
+			continue;
+		}
+		const le = /^p<=(\d+)$/.exec(tok);
+		if (le) {
+			spec.pomodorosMax = Number(le[1]);
+			continue;
+		}
+		words.push(tok);
+	}
+	if (words.length > 0) spec.text = words.join(' ');
+	if (tags.length > 0) spec.tags = tags;
+	if (locations.length > 0) spec.locations = locations;
+	if (burners.length > 0) spec.burners = burners;
+	return spec;
+}
+
 /** Fixed display order of the burner groups. */
 export const BURNER_ORDER: Burner[] = ['frontburner', 'backburner', 'fridge', 'oven'];
+
+/**
+ * Priority color per burner, used for the checkbox ring and the group dot —
+ * the ONLY place burner color appears now (rows are otherwise neutral). Green
+ * (`accent`) is reserved for interaction, so fridge is blue ("cold/parked"),
+ * not green.
+ */
+export const BURNER_COLOR: Record<Burner, 'danger' | 'orange' | 'blue' | 'dim'> = {
+	frontburner: 'danger',
+	backburner: 'orange',
+	fridge: 'blue',
+	oven: 'dim'
+};
 
 export interface BurnerMeta {
 	label: string;
@@ -100,6 +179,26 @@ export function isSpoiling(todo: Todo, now: Date): boolean {
 	return (
 		todo.burner === 'fridge' && !todo.done && ageInDays(todo.date, now) >= FRIDGE_SPOILS_AFTER_DAYS
 	);
+}
+
+/** Local `YYYY-MM-DD` for `now` (used for date grouping + relative labels). */
+export function todayStr(now: Date): string {
+	const y = now.getFullYear();
+	const m = String(now.getMonth() + 1).padStart(2, '0');
+	const d = String(now.getDate()).padStart(2, '0');
+	return `${y}-${m}-${d}`;
+}
+
+/** Short, muted relative wording for a note date: "today", "yesterday", "3d ago", or the date for future days. */
+export function relativeDate(date: string | null, now: Date): string {
+	if (!date) return '';
+	const today = todayStr(now);
+	if (date === today) return 'today';
+	if (date < today) {
+		const age = ageInDays(date, now);
+		return age === 1 ? 'yesterday' : `${age}d ago`;
+	}
+	return date;
 }
 
 function matchesFilters(todo: Todo, spec: QuerySpec): boolean {
@@ -215,30 +314,30 @@ function sortWithin(
 	return out;
 }
 
-export interface BurnerGroup {
-	burner: Burner | 'other';
-	meta: BurnerMeta;
+export type GroupMode = 'burner' | 'date';
+
+/** A rendered section on the board — a quiet header (colored dot + label + count) over its tasks. */
+export interface Group {
+	/** Stable key: a burner name / 'other', or a date bucket ('overdue'…). */
+	key: string;
+	label: string;
+	hint?: string;
+	/** Dot color for the quiet header. */
+	color: 'danger' | 'orange' | 'accent' | 'blue' | 'dim';
 	todos: Todo[];
 	/** Count of open (not-done) tasks in the group. */
 	openCount: number;
 }
 
 export interface QueryResult {
-	groups: BurnerGroup[];
+	groups: Group[];
 	/** Total tasks after filtering (open + done). */
 	total: number;
 	/** Total open tasks after filtering. */
 	openTotal: number;
 }
 
-/**
- * Apply `spec` to `todos`: filter, then group by burner in [`BURNER_ORDER`]
- * (untagged → "other" last), sorting within each group. Empty groups are
- * dropped. Pure — pass `now` for deterministic fridge-aging.
- */
-export function applyQuery(todos: Todo[], spec: QuerySpec, now: Date): QueryResult {
-	const kept = todos.filter((t) => matchesFilters(t, spec));
-
+function groupByBurner(kept: Todo[], spec: QuerySpec, now: Date): Group[] {
 	const buckets = new Map<Burner | 'other', Todo[]>();
 	for (const t of kept) {
 		const key = t.burner ?? 'other';
@@ -246,21 +345,63 @@ export function applyQuery(todos: Todo[], spec: QuerySpec, now: Date): QueryResu
 		arr.push(t);
 		buckets.set(key, arr);
 	}
-
 	const order: (Burner | 'other')[] = [...BURNER_ORDER, 'other'];
-	const groups: BurnerGroup[] = [];
+	const groups: Group[] = [];
 	for (const burner of order) {
 		const items = buckets.get(burner);
 		if (!items || items.length === 0) continue;
+		const meta = BURNER_META[burner];
 		const sorted = sortWithin(items, burner, spec.sort, now);
 		groups.push({
-			burner,
-			meta: BURNER_META[burner],
+			key: burner,
+			label: meta.label,
+			hint: meta.hint,
+			color: burner === 'other' ? 'dim' : BURNER_COLOR[burner],
 			todos: sorted,
 			openCount: sorted.filter((t) => !t.done).length
 		});
 	}
+	return groups;
+}
 
+function groupByDate(kept: Todo[], spec: QuerySpec, now: Date): Group[] {
+	const today = todayStr(now);
+	const sections: { key: string; label: string; color: Group['color']; test: (t: Todo) => boolean }[] =
+		[
+			{ key: 'overdue', label: 'Overdue', color: 'danger', test: (t) => t.date != null && t.date < today },
+			{ key: 'today', label: 'Today', color: 'accent', test: (t) => t.date === today },
+			{ key: 'upcoming', label: 'Upcoming', color: 'dim', test: (t) => t.date != null && t.date > today },
+			{ key: 'nodate', label: 'No date', color: 'dim', test: (t) => t.date == null }
+		];
+	const groups: Group[] = [];
+	for (const s of sections) {
+		const items = kept.filter(s.test);
+		if (items.length === 0) continue;
+		const sorted = sortWithin(items, 'other', spec.sort, now);
+		groups.push({
+			key: s.key,
+			label: s.label,
+			color: s.color,
+			todos: sorted,
+			openCount: sorted.filter((t) => !t.done).length
+		});
+	}
+	return groups;
+}
+
+/**
+ * Apply `spec` to `todos`: filter, then group (by burner in [`BURNER_ORDER`]
+ * with "other" last, or by relative date), sorting within each group. Empty
+ * groups are dropped. Pure — pass `now` for deterministic fridge-aging.
+ */
+export function applyQuery(
+	todos: Todo[],
+	spec: QuerySpec,
+	now: Date,
+	groupMode: GroupMode = 'burner'
+): QueryResult {
+	const kept = todos.filter((t) => matchesFilters(t, spec));
+	const groups = groupMode === 'date' ? groupByDate(kept, spec, now) : groupByBurner(kept, spec, now);
 	return {
 		groups,
 		total: kept.length,
