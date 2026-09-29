@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod db_users;
 mod error;
+mod mcp;
 mod notes;
 mod routes;
 mod settings;

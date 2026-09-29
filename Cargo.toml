@@ -30,6 +30,21 @@ openidconnect = "4.0"
 # = false` avoids pulling native-tls.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
+# Remote MCP server (Model Context Protocol) for LLM clients (litellm).
+# `rmcp` is the official Rust MCP SDK; we use its Streamable-HTTP server
+# transport mounted as a Tower service on the existing axum router. `server` +
+# `macros` give the `#[tool_router]`/`#[tool]`/`#[tool_handler]` API. rmcp
+# re-exports `schemars` 1.x (tool input schemas); we also declare it directly
+# so `#[derive(schemars::JsonSchema)]` resolves to the same unified crate.
+rmcp = { version = "3.5", features = ["server", "macros", "transport-streamable-http-server"] }
+schemars = "1"
+# JWT validation for the MCP OAuth Resource Server: verify Authentik-issued
+# access tokens (signature via JWKS, plus iss/aud/exp) before mapping the
+# subject to a rust_note user id. jsonwebtoken 11 requires exactly one crypto
+# backend feature; pick the pure-Rust `rust_crypto` (RS256/ES256, no C toolchain
+# / aws-lc-rs build) to match the workspace's rustls-only stance.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
+
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 

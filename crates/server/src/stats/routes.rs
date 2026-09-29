@@ -49,25 +49,30 @@ pub fn router() -> Router<AppState> {
 const STATS_DOC: &str = include_str!("../../../../docs/stats.md");
 const API_DOC: &str = include_str!("../../../../docs/api_stats.md");
 
+/// The concatenated stats format + API reference markdown. Shared by the REST
+/// `GET /api/stats/docs` handler and the MCP `stats://docs` resource.
+pub(crate) fn docs_markdown() -> String {
+    format!("{STATS_DOC}\n\n---\n\n{API_DOC}")
+}
+
 async fn stats_docs(RequireAuth(_user): RequireAuth) -> impl IntoResponse {
-    let body = format!("{STATS_DOC}\n\n---\n\n{API_DOC}");
     (
         [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
-        body,
+        docs_markdown(),
     )
 }
 
 // ---- GET /api/stats -------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct StatsQuery {
-    from: Option<String>,
-    to: Option<String>,
-    metric: Option<String>,
+pub(crate) struct StatsQuery {
+    pub(crate) from: Option<String>,
+    pub(crate) to: Option<String>,
+    pub(crate) metric: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-struct StatsResponse {
+pub(crate) struct StatsResponse {
     series: Vec<Series>,
 }
 
@@ -102,7 +107,7 @@ fn diary_date(note_id: &str) -> Option<String> {
     shaped.then(|| rest.to_string())
 }
 
-async fn list_stats(
+pub(crate) async fn list_stats(
     State(state): State<AppState>,
     RequireAuth(user_id): RequireAuth,
     Query(query): Query<StatsQuery>,
@@ -397,7 +402,7 @@ async fn load_settings_fm(state: &AppState, user_id: &str) -> AppResult<Frontmat
     Ok(Frontmatter::parse(&raw))
 }
 
-async fn get_registry(
+pub(crate) async fn get_registry(
     State(state): State<AppState>,
     RequireAuth(user_id): RequireAuth,
 ) -> AppResult<Json<Vec<MetricDef>>> {

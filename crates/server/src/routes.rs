@@ -72,6 +72,11 @@ pub fn build(state: AppState) -> Router {
 
     let app = api.merge(ws).with_state(state.clone());
 
+    // Mount the MCP Streamable-HTTP server (`/mcp`) + its OAuth metadata,
+    // outside the REST timeout/concurrency/body layers (like `ws`): its POST/GET
+    // streams are long-lived and it does its own body handling.
+    let app = crate::mcp::mount(app, state.clone());
+
     // Optionally serve the built SvelteKit static assets (adapter-static's
     // `web/build`) so the frontend + backend can run as one origin/container
     // behind a reverse proxy - no CORS needed, no separate static host. Any

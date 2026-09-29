@@ -140,12 +140,12 @@ async fn reindex_notes(
 // ---- GET /api/notes/*path ----------------------------------------------
 
 #[derive(Debug, Serialize)]
-struct NoteResponse {
+pub(crate) struct NoteResponse {
     meta: NoteMeta,
-    content: String,
+    pub(crate) content: String,
 }
 
-async fn get_note(
+pub(crate) async fn get_note(
     State(state): State<AppState>,
     RequireAuth(user_id): RequireAuth,
     Path(path): Path<String>,

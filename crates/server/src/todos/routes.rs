@@ -20,7 +20,7 @@ pub fn router() -> Router<AppState> {
 /// One parsed task plus the note it came from. The task fields are flattened
 /// so the wire shape is a flat object (`{ note_id, date, line, done, ... }`).
 #[derive(Debug, Serialize)]
-struct Todo {
+pub(crate) struct Todo {
     /// Source note id, e.g. `diary/2026-08-13`.
     note_id: String,
     /// The date encoded in the daily-note id (`YYYY-MM-DD`), when applicable.
@@ -30,19 +30,19 @@ struct Todo {
 }
 
 #[derive(Debug, Deserialize)]
-struct TodosQuery {
+pub(crate) struct TodosQuery {
     /// `diary` (default) restricts to daily notes; `all` scans every note.
     #[serde(default)]
-    scope: Scope,
+    pub(crate) scope: Scope,
     /// Include completed (`[x]`) tasks. Defaults to true — the board shows
     /// done tasks dimmed rather than hiding them.
     #[serde(default = "default_true")]
-    include_done: bool,
+    pub(crate) include_done: bool,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
-enum Scope {
+pub(crate) enum Scope {
     #[default]
     Diary,
     All,
@@ -66,7 +66,7 @@ fn diary_date(note_id: &str) -> Option<String> {
     shaped.then(|| rest.to_string())
 }
 
-async fn list_todos(
+pub(crate) async fn list_todos(
     State(state): State<AppState>,
     RequireAuth(user_id): RequireAuth,
     Query(query): Query<TodosQuery>,
