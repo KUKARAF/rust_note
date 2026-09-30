@@ -6,11 +6,16 @@
 //! * **foreign**: done-state is polled live over HTTP — a GET to `url` whose
 //!   JSON body carries a `has_unread` bool. The row is *pending* while
 //!   `has_unread == true` and *satisfied* once it flips to `false`.
+//! * **calendar**: done-state is derived from an iCalendar (ICS) feed at `url`.
+//!   The row is *pending* (active) while the calendar has an event occurring
+//!   *today* (in [`crate::stats::DEFAULT_TZ`]) whose `SUMMARY` matches the row's
+//!   `regex`, and *satisfied* otherwise (`done = !active`). See [`calendar`].
 //!
 //! The DEFINITIONS list (every todo, of either kind) is stored as a JSON array
 //! in a single git-backed note ([`DEFS_NOTE_ID`]); per-day local done-state
 //! stays in the daily-note frontmatter, separate from the definitions.
 
+pub mod calendar;
 pub mod routes;
 
 use std::time::Duration;
@@ -35,10 +40,15 @@ pub enum RecurringKind {
     Local,
     /// Done-state is polled from `url` (`has_unread == false` means satisfied).
     Foreign,
+    /// Done-state is derived from an ICS feed at `url`: *pending* while an event
+    /// occurring today has a `SUMMARY` matching `regex`, else *satisfied*.
+    Calendar,
 }
 
 /// A single recurring-todo definition, as stored in [`DEFS_NOTE_ID`] and sent
-/// over the API. `url` is only meaningful (and non-null) for `Foreign` rows.
+/// over the API. `url` is non-null for `Foreign` (a JSON status endpoint) and
+/// `Calendar` (an ICS feed) rows; `regex` is only meaningful for `Calendar` rows
+/// (the `SUMMARY` pattern to match against today's events).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecurringTodo {
     pub key: String,
@@ -48,14 +58,24 @@ pub struct RecurringTodo {
     pub kind: RecurringKind,
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default)]
+    pub regex: Option<String>,
 }
 
 impl RecurringTodo {
-    /// Local rows never carry a URL — normalize it away on the way in so the
-    /// stored definitions and the API responses stay consistent.
+    /// Keep only the fields each kind uses so the stored definitions and API
+    /// responses stay consistent: `Local` carries neither `url` nor `regex`;
+    /// `Foreign` keeps `url` but never `regex`; `Calendar` keeps both.
     fn normalized(mut self) -> Self {
-        if self.kind == RecurringKind::Local {
-            self.url = None;
+        match self.kind {
+            RecurringKind::Local => {
+                self.url = None;
+                self.regex = None;
+            }
+            RecurringKind::Foreign => {
+                self.regex = None;
+            }
+            RecurringKind::Calendar => {}
         }
         self
     }
@@ -70,6 +90,7 @@ pub struct RecurringTodoStatus {
     pub order: i64,
     pub kind: RecurringKind,
     pub url: Option<String>,
+    pub regex: Option<String>,
     pub done: bool,
 }
 

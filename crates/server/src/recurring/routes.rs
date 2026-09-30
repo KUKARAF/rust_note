@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use rust_note_core::frontmatter::Frontmatter;
 
+use super::calendar::{calendar_row_active, fetch_calendars};
 use super::{
     fetch_has_unread, http_client, load_defs, local_done, read_note_text, today_daily_note_id,
     RecurringKind, RecurringTodo, RecurringTodoStatus, DEFS_NOTE_ID,
@@ -22,7 +23,7 @@ use crate::notes::acl;
 use crate::notes::fs_store::note_id_to_path;
 use crate::settings::store::{load_or_bootstrap, settings_note_id};
 use crate::state::AppState;
-use crate::stats::{timezone_of, DEFAULT_TZ};
+use crate::stats::{timezone_of, today_in_tz, DEFAULT_TZ};
 
 /// Emoji returned by the public ASCII endpoint when nothing is pending.
 const ALL_DONE_EMOJI: &str = "✅";
@@ -67,8 +68,17 @@ async fn list_recurring(
     let daily_id = today_daily_note_id(&tz);
     let fm = Frontmatter::parse(&read_note_text(&state, &daily_id));
 
-    // Reuse one hardened client for every foreign poll this request makes.
+    // Reuse one hardened client for every foreign poll / ICS fetch this request
+    // makes.
     let client = http_client().map_err(AppError::Internal)?;
+
+    // Fetch + parse each distinct calendar url ONCE, then match every calendar
+    // row's regex against the shared parsed result below.
+    let calendar_urls = defs
+        .iter()
+        .filter(|d| d.kind == RecurringKind::Calendar)
+        .filter_map(|d| d.url.clone());
+    let calendars = fetch_calendars(&client, calendar_urls, today_in_tz(&tz)).await;
 
     let mut todos = Vec::with_capacity(defs.len());
     for def in defs {
@@ -83,6 +93,10 @@ async fn list_recurring(
                     .unwrap_or(false),
                 None => false,
             },
+            // Satisfied unless a matching event occurs today (done = !active).
+            RecurringKind::Calendar => {
+                !calendar_row_active(&calendars, def.url.as_deref(), def.regex.as_deref())
+            }
         };
         todos.push(RecurringTodoStatus {
             key: def.key,
@@ -91,6 +105,7 @@ async fn list_recurring(
             order: def.order,
             kind: def.kind,
             url: def.url,
+            regex: def.regex,
             done,
         });
     }
@@ -217,7 +232,15 @@ async fn compute_ascii_emoji(state: &AppState) -> String {
         }
     };
 
-    // Track the pending, ranked (order >= 1) todo with the smallest order;
+    // Fetch + parse each distinct calendar url once (public endpoint resolves
+    // "today" in the default timezone).
+    let calendar_urls = defs
+        .iter()
+        .filter(|d| d.kind == RecurringKind::Calendar)
+        .filter_map(|d| d.url.clone());
+    let calendars = fetch_calendars(&client, calendar_urls, today_in_tz(DEFAULT_TZ)).await;
+
+    // Track the pending todo with the smallest order (0 = highest priority);
     // ties resolve to the earlier array position (first seen wins).
     let mut best: Option<(i64, String)> = None;
     for def in &defs {
@@ -234,8 +257,12 @@ async fn compute_ascii_emoji(state: &AppState) -> String {
                 },
                 None => false,
             },
+            // Pending exactly when a matching event occurs today.
+            RecurringKind::Calendar => {
+                calendar_row_active(&calendars, def.url.as_deref(), def.regex.as_deref())
+            }
         };
-        if pending && def.order >= 1 && best.as_ref().is_none_or(|(o, _)| def.order < *o) {
+        if pending && best.as_ref().is_none_or(|(o, _)| def.order < *o) {
             best = Some((def.order, def.emoji.clone()));
         }
     }

@@ -12,7 +12,7 @@
 	import Card from '$lib/design/Card.svelte';
 	import Button from '$lib/design/Button.svelte';
 
-	type Kind = 'local' | 'foreign';
+	type Kind = 'local' | 'foreign' | 'calendar';
 
 	interface RecurringTodo {
 		key: string;
@@ -21,6 +21,7 @@
 		order: number;
 		kind: Kind;
 		url: string | null;
+		regex: string | null;
 		done: boolean;
 	}
 
@@ -61,7 +62,7 @@
 		saved = false;
 		todos = [
 			...todos,
-			{ key: '', label: '', emoji: '', order: 0, kind: 'local', url: null, done: false }
+			{ key: '', label: '', emoji: '', order: 0, kind: 'local', url: null, regex: null, done: false }
 		];
 	}
 
@@ -81,8 +82,16 @@
 		row.kind = kind;
 		if (kind === 'local') {
 			row.url = null;
-		} else if (row.url === null) {
-			row.url = '';
+			row.regex = null;
+		} else {
+			// foreign & calendar both use a url
+			if (row.url === null) row.url = '';
+			// only calendar uses regex
+			if (kind === 'calendar') {
+				if (row.regex === null) row.regex = '';
+			} else {
+				row.regex = null;
+			}
 		}
 	}
 
@@ -123,7 +132,10 @@
 				emoji: row.emoji.trim(),
 				order: row.order,
 				kind: row.kind,
-				url: row.kind === 'foreign' ? (row.url?.trim() ?? '') : null
+				// foreign & calendar send their url; local sends null.
+				url: row.kind === 'local' ? null : (row.url?.trim() ?? ''),
+				// only calendar sends a regex; others send null.
+				regex: row.kind === 'calendar' ? (row.regex?.trim() ?? '') : null
 			});
 		}
 		return { todos: out };
@@ -168,7 +180,7 @@
 					<button class="rt-close" onclick={onclose} aria-label="Close">✕</button>
 				</div>
 
-				<p class="rt-caption">1 = top priority, 0 = off. Smallest order ≥ 1 among pending wins.</p>
+				<p class="rt-caption">0 = top priority; higher = lower priority. Smallest order among pending wins.</p>
 
 				{#if loadState === 'loading'}
 					<p class="rt-hint">loading…</p>
@@ -196,11 +208,18 @@
 											title={row.key === '' ? 'Save first to toggle done' : 'Toggle done for today'}
 										></button>
 									{:else}
+										{@const dotLabel = row.done
+											? row.kind === 'calendar'
+												? 'no matching event today'
+												: 'satisfied'
+											: row.kind === 'calendar'
+												? 'matching event today'
+												: 'pending'}
 										<span
 											class="rt-dot"
 											class:on={row.done}
-											title={row.done ? 'satisfied' : 'pending'}
-											aria-label={row.done ? 'satisfied' : 'pending'}
+											title={dotLabel}
+											aria-label={dotLabel}
 										></span>
 									{/if}
 
@@ -226,7 +245,7 @@
 										class="rt-order"
 										class:zero={row.order === 0}
 										onclick={() => cycleOrder(row)}
-										title="Click to change priority (0 = off)"
+										title="Click to change priority (0 = top priority)"
 										aria-label="Priority order {row.order}"
 									>
 										{row.order}
@@ -261,6 +280,14 @@
 										>
 											foreign
 										</button>
+										<button
+											type="button"
+											class="rt-kind-btn"
+											class:sel={row.kind === 'calendar'}
+											onclick={() => setKind(row, 'calendar')}
+										>
+											calendar
+										</button>
 									</div>
 
 									{#if row.kind === 'foreign'}
@@ -271,6 +298,24 @@
 											bind:value={row.url}
 											oninput={() => (saved = false)}
 										/>
+									{:else if row.kind === 'calendar'}
+										<input
+											class="rt-url"
+											placeholder="https://…/calendar.ics"
+											aria-label="iCal URL"
+											bind:value={row.url}
+											oninput={() => (saved = false)}
+										/>
+										<input
+											class="rt-url"
+											placeholder="regex"
+											aria-label="Event title regex"
+											bind:value={row.regex}
+											oninput={() => (saved = false)}
+										/>
+										<span class="rt-keyhint">
+											matches event titles (case-insensitive), e.g. <code>date night</code>
+										</span>
 									{:else}
 										<span class="rt-keyhint">
 											key: <code>{row.key || slugify(row.label) || '—'}</code>

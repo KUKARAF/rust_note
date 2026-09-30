@@ -62,6 +62,11 @@ tracing-subscriber = { workspace = true }
 # `std::sync::Mutex`), so this is required for correctness — and it also
 # gives the observer callbacks / `Subscription` the `Send + Sync` bounds.
 yrs = { workspace = true, features = ["sync"] }
+icalendar = { version = "0.17.14", features = ["chrono-tz", "recurrence"] }
+rrule = "0.14.0"
+regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+chrono-tz = "0.10.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }
