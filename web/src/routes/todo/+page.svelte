@@ -13,6 +13,7 @@
 	import Button from '$lib/design/Button.svelte';
 	import Input from '$lib/design/Input.svelte';
 	import SectionTitle from '$lib/design/SectionTitle.svelte';
+	import RecurringTodosDialog from '$lib/notes/RecurringTodosDialog.svelte';
 	import {
 		applyQuery,
 		parseSearch,
@@ -47,6 +48,7 @@
 	// Display popover — grouping, sort and completed-visibility live here, off the
 	// resting canvas. Default: group by burner, show open only (done hidden).
 	let displayOpen = $state(false);
+	let recurringOpen = $state(false);
 	let groupMode = $state<GroupMode>('burner');
 	let status = $state<StatusFilter>('open');
 	let sort = $state<SortKey[] | undefined>(undefined);
@@ -199,6 +201,14 @@
 			<button
 				type="button"
 				class="display-btn"
+				class:active={recurringOpen}
+				aria-label="Recurring todos"
+				title="Recurring todos"
+				onclick={() => (recurringOpen = true)}>🔁</button
+			>
+			<button
+				type="button"
+				class="display-btn"
 				class:active={displayOpen}
 				aria-label="Display options"
 				onclick={() => (displayOpen = !displayOpen)}>⚙</button
@@ -293,6 +303,10 @@
 		{/if}
 	</Card>
 </div>
+
+{#if recurringOpen}
+	<RecurringTodosDialog onclose={() => (recurringOpen = false)} />
+{/if}
 
 <style>
 	.todo-page {

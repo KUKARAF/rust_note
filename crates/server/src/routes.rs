@@ -13,6 +13,7 @@ use tower_http::timeout::TimeoutLayer;
 use crate::auth;
 use crate::collab;
 use crate::notes;
+use crate::recurring;
 use crate::settings;
 use crate::share;
 use crate::state::AppState;
@@ -55,6 +56,7 @@ pub fn build(state: AppState) -> Router {
         .merge(todos::query::router())
         .merge(settings::routes::router())
         .merge(stats::routes::router())
+        .merge(recurring::routes::router())
         .merge(share::router())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
