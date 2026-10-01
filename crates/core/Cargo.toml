@@ -17,6 +17,11 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 rand = { workspace = true }
 base64 = { workspace = true }
+# Pipeline tracker (`leads`) uses `OffsetDateTime` for RFC3339 timestamp
+# fields. `serde-well-known` unions in `serde` + `parsing` + `formatting`, so
+# we can both `OffsetDateTime::parse(&Rfc3339)` and serialize via
+# `time::serde::rfc3339::option` without any server-only dependency.
+time = { workspace = true, features = ["serde-well-known"] }
 
 # Phase 2 (CRDT sync). `yrs` bundles the sync + awareness protocol at
 # `yrs::sync`; no separate protocol crate. Not yet used in core code.

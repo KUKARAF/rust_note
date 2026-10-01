@@ -22,13 +22,19 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, S
 use serde::Deserialize;
 use serde_json::json;
 
+use rust_note_core::frontmatter::Frontmatter;
+use rust_note_core::leads::{Kind, PipelineItem};
+
 use super::auth::AuthUser;
 use crate::auth::session::RequireAuth;
 use crate::collab::write::edit_note_through_room;
 use crate::error::{AppError, AppResult};
 use crate::notes::acl;
-use crate::notes::fs_store::{is_valid_note_id, note_id_to_path};
+use crate::notes::fs_store::{is_valid_note_id, note_id_to_path, slugify_note_id};
 use crate::state::AppState;
+
+/// Note-id prefix every pipeline item lives under.
+const PIPELINE_PREFIX: &str = "pipeline/";
 
 /// One MCP server instance. A fresh one is built per session by the service
 /// factory (see [`super::service`]), each capturing process-wide [`AppState`].
@@ -165,6 +171,110 @@ fn toggle_in_text(old: &str, line_hint: Option<u32>, text: &str, done: bool) -> 
     Some(lines.join("\n"))
 }
 
+// ---- pipeline helpers -----------------------------------------------------
+
+/// Set a frontmatter key only when `val` is present and non-blank (trimmed).
+fn set_opt(fm: &mut Frontmatter, key: &str, val: Option<&str>) {
+    if let Some(v) = val.map(str::trim).filter(|s| !s.is_empty()) {
+        fm.set(key, v);
+    }
+}
+
+/// Today's civil date (`YYYY-MM-DD`) in the default tracker timezone, used for
+/// the `- <today> — …` timeline prefix. Matches the stats module's default-tz
+/// convention (interviews/leads are local-calendar events for a one-person
+/// vault); the full `last_activity_at` timestamp stays RFC3339/UTC.
+fn today_string() -> String {
+    crate::stats::fmt_date(crate::stats::today_in_tz(crate::stats::DEFAULT_TZ))
+}
+
+/// Prepend `entry` as the newest line directly under the body's `## Timeline`
+/// heading. If the body has no such heading, append one (with the entry) at the
+/// end. The rest of the body is preserved byte-for-byte (split/join round-trip).
+fn prepend_timeline(body: &str, entry: &str) -> String {
+    const HEADING: &str = "## Timeline";
+    let lines: Vec<&str> = body.split('\n').collect();
+    match lines.iter().position(|l| l.trim() == HEADING) {
+        Some(idx) => {
+            let mut out: Vec<String> = Vec::with_capacity(lines.len() + 1);
+            for (i, line) in lines.iter().enumerate() {
+                out.push((*line).to_string());
+                if i == idx {
+                    out.push(entry.to_string());
+                }
+            }
+            out.join("\n")
+        }
+        None => {
+            let trimmed = body.trim_end_matches('\n');
+            if trimmed.is_empty() {
+                format!("{HEADING}\n{entry}\n")
+            } else {
+                format!("{trimmed}\n\n{HEADING}\n{entry}\n")
+            }
+        }
+    }
+}
+
+/// Render a brand-new pipeline note (frontmatter + heading + `## Timeline`
+/// body) from create args. `kind_str` is the already-validated canonical kind.
+fn render_new_pipeline_note(kind_str: &str, args: &CreatePipelineArgs) -> String {
+    let company = args.company.trim();
+    let role = args
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let mut fm = Frontmatter {
+        fields: Vec::new(),
+        body: String::new(),
+    };
+    fm.set("kind", kind_str);
+    fm.set("company", company);
+    set_opt(&mut fm, "role", role);
+    set_opt(&mut fm, "stage", args.stage.as_deref());
+    if let Some(ball) = args
+        .ball
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        fm.set("ball", &ball.to_ascii_lowercase());
+    }
+    set_opt(&mut fm, "expected_at", args.expected_at.as_deref());
+    set_opt(&mut fm, "next_action", args.next_action.as_deref());
+    set_opt(&mut fm, "source", args.source.as_deref());
+    set_opt(&mut fm, "url", args.url.as_deref());
+    set_opt(&mut fm, "contract", args.contract.as_deref());
+    set_opt(&mut fm, "rate_asked", args.rate_asked.as_deref());
+    set_opt(&mut fm, "tags", args.tags.as_deref());
+    set_opt(&mut fm, "contact", args.contact.as_deref());
+    if let Some(p) = args.priority {
+        fm.set("priority", &p.to_string());
+    }
+    set_opt(&mut fm, "applied_at", args.applied_at.as_deref());
+    fm.set("last_activity_at", &acl::now_rfc3339());
+
+    let heading = match role {
+        Some(r) => format!("{company} — {r}"),
+        None => company.to_string(),
+    };
+    let mut body = format!("# {heading}\n\n");
+    if let Some(note) = args
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        body.push_str(note);
+        body.push_str("\n\n");
+    }
+    body.push_str("## Timeline\n");
+    fm.body = body;
+    fm.render()
+}
+
 // ---- tool argument types --------------------------------------------------
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -264,6 +374,178 @@ struct CreateNoteToolArgs {
     /// Optional initial markdown content.
     #[serde(default)]
     content: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ListPipelineArgs {
+    /// `lead` | `application`; omit for all kinds.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Include closed items (terminal stage or ball=none). Defaults to false.
+    #[serde(default)]
+    include_closed: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CreatePipelineArgs {
+    /// Company / contact org. Required.
+    company: String,
+    /// `lead` (a gig Rafał could do) or `application` (Rafał applied). Required.
+    kind: String,
+    /// Role applied for, or the gig / what-for.
+    #[serde(default)]
+    role: Option<String>,
+    /// Pipeline stage (free text, e.g. `applied`, `interview`, `proposal`).
+    #[serde(default)]
+    stage: Option<String>,
+    /// Whose court the ball is in: `ours` | `theirs` | `none`.
+    #[serde(default)]
+    ball: Option<String>,
+    /// Deadline the ball should move by, RFC3339.
+    #[serde(default)]
+    expected_at: Option<String>,
+    /// The concrete next action the ball represents.
+    #[serde(default)]
+    next_action: Option<String>,
+    /// Where it came from (justjoin / referral / inbound / …).
+    #[serde(default)]
+    source: Option<String>,
+    /// Posting or contact link.
+    #[serde(default)]
+    url: Option<String>,
+    /// Contract type (B2B / UoP / …).
+    #[serde(default)]
+    contract: Option<String>,
+    /// Rate asked, e.g. `200 PLN/h +VAT`.
+    #[serde(default)]
+    rate_asked: Option<String>,
+    /// Comma-separated tags, e.g. `ai, remote, german`.
+    #[serde(default)]
+    tags: Option<String>,
+    /// Comma-separated `Name <email> (role)` contact entries.
+    #[serde(default)]
+    contact: Option<String>,
+    /// Priority 1–5 (higher = chase harder).
+    #[serde(default)]
+    priority: Option<u8>,
+    /// Date applied / first contact, `YYYY-MM-DD`.
+    #[serde(default)]
+    applied_at: Option<String>,
+    /// Optional markdown body, inserted above the `## Timeline` section.
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct UpdatePipelineArgs {
+    /// Pipeline note id, e.g. `pipeline/affirm-senior-swe-backend`.
+    id: String,
+    #[serde(default)]
+    company: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    stage: Option<String>,
+    #[serde(default)]
+    ball: Option<String>,
+    #[serde(default)]
+    expected_at: Option<String>,
+    #[serde(default)]
+    next_action: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    contract: Option<String>,
+    #[serde(default)]
+    rate_asked: Option<String>,
+    #[serde(default)]
+    rate_offered: Option<String>,
+    #[serde(default)]
+    contact: Option<String>,
+    #[serde(default)]
+    tags: Option<String>,
+    #[serde(default)]
+    priority: Option<u8>,
+    #[serde(default)]
+    applied_at: Option<String>,
+    #[serde(default)]
+    next_interview_at: Option<String>,
+    #[serde(default)]
+    closed_reason: Option<String>,
+}
+
+impl UpdatePipelineArgs {
+    /// Collect the supplied frontmatter keys to `set`, trimmed and non-blank.
+    /// `kind`/`ball` are normalized lowercase; `priority` is stringified.
+    /// `last_activity_at` is deliberately NOT here — the caller always bumps it.
+    fn frontmatter_updates(&self) -> Vec<(&'static str, String)> {
+        let mut out: Vec<(&'static str, String)> = Vec::new();
+        for (key, val) in [
+            ("company", &self.company),
+            ("role", &self.role),
+            ("stage", &self.stage),
+            ("expected_at", &self.expected_at),
+            ("next_action", &self.next_action),
+            ("source", &self.source),
+            ("url", &self.url),
+            ("contract", &self.contract),
+            ("rate_asked", &self.rate_asked),
+            ("rate_offered", &self.rate_offered),
+            ("contact", &self.contact),
+            ("tags", &self.tags),
+            ("applied_at", &self.applied_at),
+            ("next_interview_at", &self.next_interview_at),
+            ("closed_reason", &self.closed_reason),
+        ] {
+            if let Some(v) = val.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                out.push((key, v.to_string()));
+            }
+        }
+        if let Some(v) = self
+            .kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            out.push(("kind", v.to_ascii_lowercase()));
+        }
+        if let Some(v) = self
+            .ball
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            out.push(("ball", v.to_ascii_lowercase()));
+        }
+        if let Some(p) = self.priority {
+            out.push(("priority", p.to_string()));
+        }
+        out
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct LogPipelineEventArgs {
+    /// Pipeline note id, e.g. `pipeline/affirm-senior-swe-backend`.
+    id: String,
+    /// The event text; prepended as `- <today> — <line>` under `## Timeline`.
+    line: String,
+    /// Optionally also set whose court the ball is in: `ours`|`theirs`|`none`.
+    #[serde(default)]
+    ball: Option<String>,
+    /// Optionally also set the deadline (RFC3339).
+    #[serde(default)]
+    expected_at: Option<String>,
+    /// Optionally also set the stage.
+    #[serde(default)]
+    stage: Option<String>,
+    /// Optionally also set the next action.
+    #[serde(default)]
+    next_action: Option<String>,
 }
 
 #[tool_router]
@@ -610,6 +892,246 @@ impl McpServer {
         {
             Ok(Json(meta)) => json_ok(&meta),
             Err(e) => Ok(app_error_to_tool(e)),
+        }
+    }
+
+    #[tool(
+        description = "List pipeline items (leads + applications) in the same shape as GET \
+                       /api/pipeline: each item flattened with a derived `overdue` bool. Filter \
+                       by `kind` (lead|application); `include_closed` defaults to false."
+    )]
+    async fn list_pipeline(
+        &self,
+        Parameters(args): Parameters<ListPipelineArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::pipeline::routes::PipelineQuery;
+        let user = require_user(&ctx)?;
+        let query = PipelineQuery {
+            kind: args.kind,
+            include_closed: args.include_closed.unwrap_or(false),
+        };
+        match crate::pipeline::routes::list_pipeline(
+            State(self.state.clone()),
+            RequireAuth(user),
+            Query(query),
+        )
+        .await
+        {
+            Ok(Json(items)) => json_ok(&items),
+            Err(e) => Ok(app_error_to_tool(e)),
+        }
+    }
+
+    /// Conflict-check, register ownership, and write a brand-new pipeline note
+    /// through the collab room, returning the parsed item. Mirrors the REST
+    /// create path's checks but writes through the room (never the file
+    /// directly).
+    async fn create_pipeline(
+        &self,
+        user: &str,
+        note_id: &str,
+        kind_str: &str,
+        args: &CreatePipelineArgs,
+    ) -> AppResult<PipelineItem> {
+        if !is_valid_note_id(note_id) {
+            return Err(AppError::BadRequest("invalid note id".to_string()));
+        }
+        let db = &self.state.db;
+        let rel = note_id_to_path(note_id);
+        let on_disk = self
+            .state
+            .notes_repo
+            .read_file(&rel)
+            .map_err(AppError::Internal)?
+            .is_some();
+        if on_disk
+            || acl::note_exists(db, note_id)
+                .await
+                .map_err(AppError::Internal)?
+        {
+            return Err(AppError::Conflict(format!("note {note_id} already exists")));
+        }
+        acl::ensure_note_registered(db, note_id, user)
+            .await
+            .map_err(AppError::Internal)?;
+
+        let content = render_new_pipeline_note(kind_str, args);
+        let applied =
+            edit_note_through_room(&self.state, note_id, user, move |_old| Some(content)).await?;
+        if !applied {
+            return Err(AppError::Internal(anyhow::anyhow!("write was refused")));
+        }
+        acl::touch_updated_at(db, note_id)
+            .await
+            .map_err(AppError::Internal)?;
+
+        let text = self
+            .state
+            .notes_repo
+            .read_file(&rel)
+            .map_err(AppError::Internal)?
+            .unwrap_or_default();
+        let fm = Frontmatter::parse(&text);
+        PipelineItem::from_frontmatter(note_id, &fm).ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!(
+                "created note did not parse as a pipeline item"
+            ))
+        })
+    }
+
+    #[tool(
+        description = "Create a new pipeline item note under pipeline/ from company+kind \
+                       (slugs the id, optional role appended). Writes the frontmatter note (+ \
+                       optional body) through the collab room. Fails if it already exists."
+    )]
+    async fn create_pipeline_item(
+        &self,
+        Parameters(args): Parameters<CreatePipelineArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let user = require_user(&ctx)?;
+        let Some(kind) = Kind::parse(&args.kind) else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "kind must be 'lead' or 'application'",
+            )]));
+        };
+        let kind_str = match kind {
+            Kind::Lead => "lead",
+            Kind::Application => "application",
+        };
+        let company = args.company.trim();
+        if company.is_empty() {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "company is required",
+            )]));
+        }
+        let title = match args
+            .role
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(role) => format!("{PIPELINE_PREFIX}{company} {role}"),
+            None => format!("{PIPELINE_PREFIX}{company}"),
+        };
+        let note_id = slugify_note_id(&title);
+        if note_id.is_empty() {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "could not derive a note id from company/role",
+            )]));
+        }
+        match self.create_pipeline(&user, &note_id, kind_str, &args).await {
+            Ok(item) => json_ok(&item),
+            Err(e) => Ok(app_error_to_tool(e)),
+        }
+    }
+
+    #[tool(
+        description = "Update frontmatter fields on an existing pipeline item (merge; untouched \
+                       keys kept). Bumps last_activity_at. Writes through the collab room."
+    )]
+    async fn update_pipeline_item(
+        &self,
+        Parameters(args): Parameters<UpdatePipelineArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let user = require_user(&ctx)?;
+        if !args.id.starts_with(PIPELINE_PREFIX) {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "id must be a pipeline/ note",
+            )]));
+        }
+        if let Err(e) = self.authorize_write(&user, &args.id).await {
+            return Ok(app_error_to_tool(e));
+        }
+        let fields = args.frontmatter_updates();
+        let now = acl::now_rfc3339();
+        let id = args.id.clone();
+        let applied = edit_note_through_room(&self.state, &args.id, &user, move |old| {
+            let mut fm = Frontmatter::parse(old);
+            for (key, value) in &fields {
+                fm.set(key, value);
+            }
+            fm.set("last_activity_at", &now);
+            Some(fm.render())
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        if applied {
+            json_ok(&json!({ "id": id, "updated": true }))
+        } else {
+            Ok(CallToolResult::error(vec![ContentBlock::text(
+                "update was refused",
+            )]))
+        }
+    }
+
+    #[tool(
+        description = "Log a timeline event on a pipeline item: prepends `- <today> — <line>` \
+                       under the body `## Timeline`, bumps last_activity_at, and applies any of \
+                       ball/expected_at/stage/next_action. Writes through the collab room."
+    )]
+    async fn log_pipeline_event(
+        &self,
+        Parameters(args): Parameters<LogPipelineEventArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let user = require_user(&ctx)?;
+        if !args.id.starts_with(PIPELINE_PREFIX) {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "id must be a pipeline/ note",
+            )]));
+        }
+        if let Err(e) = self.authorize_write(&user, &args.id).await {
+            return Ok(app_error_to_tool(e));
+        }
+        let line = args.line.trim().to_string();
+        if line.is_empty() {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "line must not be empty",
+            )]));
+        }
+        let entry = format!("- {} — {}", today_string(), line);
+        let now = acl::now_rfc3339();
+
+        let mut fields: Vec<(&'static str, String)> = Vec::new();
+        if let Some(v) = args
+            .ball
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            fields.push(("ball", v.to_ascii_lowercase()));
+        }
+        for (key, val) in [
+            ("expected_at", &args.expected_at),
+            ("stage", &args.stage),
+            ("next_action", &args.next_action),
+        ] {
+            if let Some(v) = val.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                fields.push((key, v.to_string()));
+            }
+        }
+
+        let id = args.id.clone();
+        let applied = edit_note_through_room(&self.state, &args.id, &user, move |old| {
+            let mut fm = Frontmatter::parse(old);
+            for (key, value) in &fields {
+                fm.set(key, value);
+            }
+            fm.set("last_activity_at", &now);
+            fm.body = prepend_timeline(&fm.body, &entry);
+            Some(fm.render())
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        if applied {
+            json_ok(&json!({ "id": id, "logged": true }))
+        } else {
+            Ok(CallToolResult::error(vec![ContentBlock::text(
+                "log was refused",
+            )]))
         }
     }
 }

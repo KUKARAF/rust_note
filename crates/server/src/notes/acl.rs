@@ -235,7 +235,7 @@ pub async fn revoke_access(db: &SqlitePool, note_id: &str, user_id: &str) -> any
     Ok(())
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()

@@ -196,6 +196,7 @@
 
 			<Button variant="outline" size="sm" onclick={() => openTodayNote()}>Today</Button>
 			<a class="nav-link" href={resolve('/todo')}>Todos</a>
+			<a class="nav-link" href={resolve('/pipeline')}>Pipeline</a>
 			<a class="nav-link" href={resolve('/stats')}>Stats</a>
 
 			<div class="app-nav-spacer"></div>

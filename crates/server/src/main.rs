@@ -6,6 +6,7 @@ mod db_users;
 mod error;
 mod mcp;
 mod notes;
+mod pipeline;
 mod recurring;
 mod routes;
 mod settings;
