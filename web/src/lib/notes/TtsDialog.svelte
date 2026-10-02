@@ -10,13 +10,22 @@
 	//
 	// Playback is chunked and progressively buffered rather than one big
 	// synthesis request: the input text is split into small ordered chunks,
-	// each is synthesized with its own POST, and a rolling window of chunks
-	// ahead of the one currently playing is kept pre-fetched so the NEXT
-	// chunk's audio is ready before the current one finishes. Chunks play
-	// back-to-back through a single <audio> element; small gaps at sentence
-	// boundaries are expected and fine (no attempt at gapless/Web Audio
-	// stitching). This makes playback start fast (first chunk is small) and
-	// keeps one bad/slow chunk from blocking or failing the whole note.
+	// each is synthesized with its own POST. Rather than keeping only a
+	// fixed-size window of chunks pre-fetched, a small scheduler ("pump")
+	// keeps up to `prefetchAhead` synthesis requests in flight at once,
+	// always picking the lowest-index not-yet-fetched chunk at or after the
+	// one currently playing first, then racing ahead through the rest of the
+	// note as capacity frees up. Because each chunk synthesizes in roughly
+	// 1-3s but plays back for ~15-20s, this lets the buffer race ahead of
+	// playback instead of merely keeping pace with it, so after the first
+	// chunk or two the whole note is typically fully buffered and playback
+	// never stalls. Playback still starts as soon as chunk 0 is ready —
+	// buffering the rest continues in the background while it plays. Chunks
+	// play back-to-back through a single <audio> element; small gaps at
+	// sentence boundaries are expected and fine (no attempt at gapless/Web
+	// Audio stitching). This makes playback start fast (first chunk is
+	// small) and keeps one bad/slow chunk from blocking or failing the whole
+	// note.
 	import { onDestroy } from 'svelte';
 	import { rawFetch } from '$lib/api/client';
 	import { fetchAiModels } from '$lib/stores/settings';
@@ -41,8 +50,8 @@
 
 	// --- Chunked playback state -------------------------------------------
 
-	/** Default for how many chunks beyond the currently-playing one to keep pre-fetched. */
-	const DEFAULT_PREFETCH_AHEAD = 2;
+	/** Default max number of concurrent in-flight /api/tts synthesis requests. */
+	const DEFAULT_PREFETCH_AHEAD = 3;
 
 	// --- Advanced (user-tunable) settings ----------------------------------
 	// Live-editable from the "Advanced" disclosure, but only taken into account
@@ -51,6 +60,7 @@
 	// resizing the prefetch window out from under an in-flight buffer.
 
 	let maxWordsPerChunk = $state(MAX_WORDS_PER_CHUNK);
+	/** Max concurrent synthesis requests the scheduler keeps in flight (see `pumpScheduler`). */
 	let prefetchAhead = $state(DEFAULT_PREFETCH_AHEAD);
 
 	const MIN_WORDS_PER_CHUNK = 5;
@@ -92,6 +102,12 @@
 	let playError = $state<string | null>(null);
 	let truncatedNotice = $state<string | null>(null);
 	let audioEl: HTMLAudioElement | undefined = $state();
+
+	/** Chunks that have finished synthesizing at least once (ready to play, or already played). */
+	let bufferedCount = $derived(
+		slots.filter((s) => s.status === 'ready' || s.status === 'done').length
+	);
+	let allBuffered = $derived(chunks.length > 0 && bufferedCount === chunks.length);
 
 	// Plain (non-reactive) bookkeeping: one AbortController per in-flight fetch,
 	// keyed by chunk index, so Stop/close can abort everything outstanding.
@@ -150,26 +166,53 @@
 			const blob = await res.blob();
 			slot.url = URL.createObjectURL(blob);
 			slot.status = 'ready';
-			// A slot just freed up (conceptually) — keep the prefetch window full.
-			ensurePrefetch();
+			// This slot is done — a concurrency slot just freed up; pump the
+			// scheduler so the next idle chunk (if any) starts immediately.
+			pumpScheduler();
 		} catch (err) {
 			if (err instanceof DOMException && err.name === 'AbortError') {
-				// Stopped/closed mid-flight — not a user-facing error.
+				// Stopped/closed mid-flight — not a user-facing error, and the
+				// scheduler must NOT keep pumping past a deliberate stop.
 				return;
 			}
 			slot.status = 'error';
 			slot.error = err instanceof Error ? err.message : 'Failed to synthesize audio.';
+			// Not a retry: this chunk stays 'error' and is never re-queued. But
+			// the concurrency slot it held is now free, so keep the rest of the
+			// note buffering.
+			pumpScheduler();
 		} finally {
 			controllers.delete(index);
 		}
 	}
 
-	/** Kick off fetches for every idle chunk in [currentIndex, currentIndex + prefetchAhead]. */
-	function ensurePrefetch() {
-		const end = Math.min(currentIndex + prefetchAhead, chunks.length - 1);
-		for (let i = currentIndex; i <= end; i++) {
-			const slot = slots[i];
-			if (slot && slot.status === 'idle') void fetchChunk(i);
+	/**
+	 * Lowest-index chunk at or after `currentIndex` that hasn't been fetched
+	 * yet, or -1 if none remain. Chunks before `currentIndex` are already
+	 * played/done and never revisited.
+	 */
+	function nextIdleIndex(): number {
+		for (let i = currentIndex; i < chunks.length; i++) {
+			if (slots[i]?.status === 'idle') return i;
+		}
+		return -1;
+	}
+
+	/**
+	 * The buffering scheduler ("pump"): keeps up to `prefetchAhead` synthesis
+	 * requests in flight at once, buffering the ENTIRE rest of the note (not
+	 * just a fixed window). The chunk right at/after `currentIndex` is always
+	 * started first since it's prioritized by `nextIdleIndex`; once started,
+	 * `fetchChunk`'s completion calls back into this function to backfill the
+	 * freed concurrency slot, so this keeps racing ahead — one continuous pump
+	 * rather than a one-shot window — until every chunk is either in flight,
+	 * ready, done, or errored.
+	 */
+	function pumpScheduler() {
+		while (controllers.size < prefetchAhead) {
+			const index = nextIdleIndex();
+			if (index === -1) break;
+			void fetchChunk(index);
 		}
 	}
 
@@ -217,7 +260,7 @@
 			return;
 		}
 		playState = 'buffering';
-		ensurePrefetch();
+		pumpScheduler();
 	}
 
 	async function loadModels() {
@@ -275,7 +318,7 @@
 
 		playState = 'buffering';
 		playError = null;
-		ensurePrefetch();
+		pumpScheduler();
 	}
 
 	function pause() {
@@ -362,7 +405,7 @@
 								/>
 							</label>
 							<label class="rt-field">
-								<span class="rt-field-label">Buffer size (chunks ahead)</span>
+								<span class="rt-field-label">Parallel synthesis requests</span>
 								<input
 									class="rt-number"
 									type="number"
@@ -374,6 +417,10 @@
 									disabled={playState !== 'idle'}
 								/>
 							</label>
+							<p class="rt-hint">
+								How many chunks to fetch at once — higher values buffer the note faster but send
+								more concurrent requests.
+							</p>
 							<p class="rt-hint">
 								{previewChunkCount} chunk{previewChunkCount === 1 ? '' : 's'} at this cap · takes effect
 								on next Play
@@ -394,6 +441,28 @@
 							chunk {Math.min(currentIndex + 1, chunks.length)} / {chunks.length}
 							{#if playState === 'buffering'}(buffering…){/if}
 						</p>
+
+						<div class="rt-buffer" aria-live="polite">
+							<div
+								class="rt-buffer-track"
+								role="progressbar"
+								aria-valuemin="0"
+								aria-valuemax={chunks.length}
+								aria-valuenow={bufferedCount}
+							>
+								<div
+									class="rt-buffer-fill"
+									style={`width: ${(bufferedCount / chunks.length) * 100}%`}
+								></div>
+							</div>
+							<p class="rt-hint rt-buffer-label">
+								{#if allBuffered}
+									✓ fully loaded
+								{:else}
+									buffered {bufferedCount} / {chunks.length}
+								{/if}
+							</p>
+						</div>
 					{/if}
 
 					<audio class="rt-audio" bind:this={audioEl} src={currentAudioUrl} onended={handleEnded}
@@ -576,6 +645,30 @@
 
 	.rt-audio {
 		display: none;
+	}
+
+	.rt-buffer {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+	}
+
+	.rt-buffer-track {
+		height: 4px;
+		border-radius: var(--radius-control);
+		background: var(--surface-input);
+		overflow: hidden;
+	}
+
+	.rt-buffer-fill {
+		height: 100%;
+		background: var(--kv-accent);
+		border-radius: var(--radius-control);
+		transition: width 0.2s ease-out;
+	}
+
+	.rt-buffer-label {
+		margin: 0;
 	}
 
 	.rt-actions {
