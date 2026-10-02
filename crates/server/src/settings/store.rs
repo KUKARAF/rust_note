@@ -19,6 +19,10 @@ pub struct UserSettings {
     /// OpenRouter API key. Stored here (server-side) and never returned by the
     /// settings GET — see `SettingsResponse`.
     pub openrouter_api_key: String,
+    /// Base URL of the OpenAI-compatible AI endpoint (the user's LiteLLM
+    /// proxy). `/chat/completions` and `/models` are appended to it. See
+    /// `docs/litellm.md`.
+    pub ai_endpoint: String,
 
     // ---- priority-notify digest (see `docs/notifications.md`) ----
     /// Whether the overdue-pipeline digest is pushed to priority-notify.
@@ -48,6 +52,7 @@ impl Default for UserSettings {
             theme: "ration".to_string(),
             openrouter_model: DEFAULT_OPENROUTER_MODEL.to_string(),
             openrouter_api_key: String::new(),
+            ai_endpoint: DEFAULT_AI_ENDPOINT.to_string(),
             notify_enabled: false,
             notify_endpoint: DEFAULT_NOTIFY_ENDPOINT.to_string(),
             notify_token: String::new(),
@@ -85,10 +90,15 @@ pub fn is_valid_notify_scope(s: &str) -> bool {
     NOTIFY_SCOPES.contains(&s)
 }
 
-/// Default OpenRouter model for new settings. The settings UI offers a few
-/// suggestions; [`is_valid_model_id`] (not an allowlist) governs what's
-/// accepted, since OpenRouter's catalog changes over time.
-pub const DEFAULT_OPENROUTER_MODEL: &str = "minimax/minimax-m3";
+/// Default AI (LiteLLM) base URL for new settings; `/chat/completions` and
+/// `/models` are appended to it. See `docs/litellm.md`.
+pub const DEFAULT_AI_ENDPOINT: &str = "https://litellm.osmosis.page/v1";
+
+/// Default model for new settings (a local model on the LiteLLM proxy). The
+/// settings UI lets the user pick from the proxy's model list;
+/// [`is_valid_model_id`] (not an allowlist) governs what's accepted, since the
+/// catalog changes over time.
+pub const DEFAULT_OPENROUTER_MODEL: &str = "gpt-oss-20b";
 
 /// Whether `model` is a plausible OpenRouter model id: non-empty, bounded, and
 /// only `vendor/model`-style characters. Deliberately permissive (format, not
@@ -143,6 +153,12 @@ pub fn parse_settings_tolerant(content: &str) -> UserSettings {
         .unwrap_or(DEFAULT_OPENROUTER_MODEL)
         .to_string();
     let openrouter_api_key = fm.get("openrouter_api_key").unwrap_or("").to_string();
+    let ai_endpoint = fm
+        .get("ai_endpoint")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_AI_ENDPOINT)
+        .to_string();
 
     // "true"/"false" tolerant: any value other than the literal `true` is off.
     let notify_enabled = fm.get("notify_enabled") == Some("true");
@@ -177,6 +193,7 @@ pub fn parse_settings_tolerant(content: &str) -> UserSettings {
         theme,
         openrouter_model,
         openrouter_api_key,
+        ai_endpoint,
         notify_enabled,
         notify_endpoint,
         notify_token,
@@ -413,6 +430,31 @@ mod tests {
     fn parse_settings_tolerant_falls_back_on_unknown_theme() {
         let settings = parse_settings_tolerant("---\ntheme: bogus-theme\n---\nbody\n");
         assert_eq!(settings.theme, "ration");
+    }
+
+    #[test]
+    fn ai_endpoint_and_default_model_default_when_absent() {
+        let s = parse_settings_tolerant("---\ntheme: ration\n---\n");
+        assert_eq!(s.ai_endpoint, DEFAULT_AI_ENDPOINT);
+        assert_eq!(s.ai_endpoint, "https://litellm.osmosis.page/v1");
+        // The default model is now a LiteLLM-proxy local model.
+        assert_eq!(s.openrouter_model, "gpt-oss-20b");
+        assert_eq!(UserSettings::default().openrouter_model, "gpt-oss-20b");
+        assert_eq!(UserSettings::default().ai_endpoint, DEFAULT_AI_ENDPOINT);
+    }
+
+    #[test]
+    fn ai_endpoint_round_trips_through_frontmatter() {
+        let s = parse_settings_tolerant(
+            "---\ntheme: ration\nai_endpoint: https://proxy.example.com/v1\n---\nbody\n",
+        );
+        assert_eq!(s.ai_endpoint, "https://proxy.example.com/v1");
+    }
+
+    #[test]
+    fn ai_endpoint_blank_falls_back_to_default() {
+        let s = parse_settings_tolerant("---\ntheme: ration\nai_endpoint: \"   \"\n---\n");
+        assert_eq!(s.ai_endpoint, DEFAULT_AI_ENDPOINT);
     }
 
     #[test]

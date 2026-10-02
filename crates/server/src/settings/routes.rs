@@ -19,6 +19,7 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/ai/models", get(get_ai_models))
         .route(
             "/api/settings/notify-test",
             post(notify::routes::notify_test),
@@ -29,9 +30,11 @@ pub fn router() -> Router<AppState> {
 struct SettingsResponse {
     theme: String,
     openrouter_model: String,
-    /// Whether an OpenRouter API key is stored. The key itself is NEVER
+    /// Whether an AI (LiteLLM) API key is stored. The key itself is NEVER
     /// returned — the client only needs to know if one is set.
     has_openrouter_key: bool,
+    /// Base URL of the OpenAI-compatible AI endpoint (non-secret).
+    ai_endpoint: String,
 
     // ---- priority-notify digest ----
     notify_enabled: bool,
@@ -50,6 +53,7 @@ impl SettingsResponse {
             theme: s.theme.clone(),
             openrouter_model: s.openrouter_model.clone(),
             has_openrouter_key: !s.openrouter_api_key.is_empty(),
+            ai_endpoint: s.ai_endpoint.clone(),
             notify_enabled: s.notify_enabled,
             notify_endpoint: s.notify_endpoint.clone(),
             notify_priority: s.notify_priority.clone(),
@@ -67,6 +71,9 @@ struct PutSettingsRequest {
     theme: Option<String>,
     openrouter_model: Option<String>,
     openrouter_api_key: Option<String>,
+    /// Base URL of the OpenAI-compatible AI endpoint; validated as an http(s)
+    /// URL (non-secret).
+    ai_endpoint: Option<String>,
 
     // ---- priority-notify digest ----
     notify_enabled: Option<bool>,
@@ -135,6 +142,13 @@ async fn put_settings(
             ));
         }
     }
+    if let Some(endpoint) = &body.ai_endpoint {
+        if !notify::is_valid_endpoint(endpoint) {
+            return Err(AppError::BadRequest(
+                "ai_endpoint must be an http(s) URL".to_string(),
+            ));
+        }
+    }
 
     let note_id = store::settings_note_id(&user_id);
     let rel_path = note_id_to_path(&note_id);
@@ -162,6 +176,9 @@ async fn put_settings(
     // A key sent (even empty, to clear it) is written; omitted leaves it as-is.
     if let Some(key) = &body.openrouter_api_key {
         fm.set("openrouter_api_key", key);
+    }
+    if let Some(endpoint) = &body.ai_endpoint {
+        fm.set("ai_endpoint", endpoint);
     }
     if let Some(enabled) = &body.notify_enabled {
         fm.set("notify_enabled", if *enabled { "true" } else { "false" });
@@ -207,6 +224,97 @@ async fn put_settings(
     // Re-read so the response reflects the persisted state (incl. has-key).
     let updated = store::parse_settings_tolerant(&new_content);
     Ok(Json(SettingsResponse::from_settings(&updated)))
+}
+
+/// Response of `GET /api/ai/models`: the sorted model ids available on the
+/// user's AI endpoint, or an empty list plus a human-readable `error` when a
+/// key is missing or the upstream can't be reached. Always HTTP 200 — never a
+/// 500 — so the frontend can degrade gracefully. The API key is NEVER included.
+#[derive(Debug, Serialize)]
+struct AiModelsResponse {
+    models: Vec<String>,
+    error: Option<String>,
+}
+
+impl AiModelsResponse {
+    fn ok(models: Vec<String>) -> Json<Self> {
+        Json(Self {
+            models,
+            error: None,
+        })
+    }
+    fn err(message: impl Into<String>) -> Json<Self> {
+        Json(Self {
+            models: Vec::new(),
+            error: Some(message.into()),
+        })
+    }
+}
+
+/// OpenAI-compatible `GET {base}/models` envelope: `{ "data": [{ "id": … }] }`.
+#[derive(Debug, Deserialize)]
+struct ModelsEnvelope {
+    data: Vec<ModelEntry>,
+}
+#[derive(Debug, Deserialize)]
+struct ModelEntry {
+    id: String,
+}
+
+/// `GET /api/ai/models` — proxy the user's AI endpoint `GET {ai_endpoint}/models`
+/// with their Bearer key and return the sorted model ids. Degrades gracefully
+/// (HTTP 200 with an `error` string, empty `models`) when no key is configured
+/// or the upstream fails; never 500s and never leaks the key.
+async fn get_ai_models(
+    State(state): State<AppState>,
+    RequireAuth(user_id): RequireAuth,
+) -> Json<AiModelsResponse> {
+    let note_id = store::settings_note_id(&user_id);
+    let settings = {
+        let _guard = state.note_locks.lock(&note_id).await;
+        match store::load_or_bootstrap(&state, &user_id).await {
+            Ok(s) => s,
+            Err(_) => return AiModelsResponse::err("could not load settings"),
+        }
+    };
+
+    // Resolve the key exactly like the query endpoint (settings, else env).
+    let key = if !settings.openrouter_api_key.is_empty() {
+        settings.openrouter_api_key.clone()
+    } else if let Some(k) = &state.config.openrouter_api_key {
+        k.clone()
+    } else {
+        return AiModelsResponse::err("set an API key first");
+    };
+
+    let url = format!(
+        "{}/models",
+        settings.ai_endpoint.trim().trim_end_matches('/')
+    );
+
+    let client = match crate::recurring::http_client() {
+        Ok(c) => c,
+        Err(_) => return AiModelsResponse::err("could not build HTTP client"),
+    };
+
+    // The key rides in the Authorization header (never the URL), so none of the
+    // error strings below can leak it.
+    let resp = match client.get(&url).bearer_auth(&key).send().await {
+        Ok(r) => r,
+        Err(_) => return AiModelsResponse::err("could not reach the AI endpoint"),
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        return AiModelsResponse::err(format!("the AI endpoint returned {status}"));
+    }
+    let envelope: ModelsEnvelope = match resp.json().await {
+        Ok(e) => e,
+        Err(_) => return AiModelsResponse::err("could not parse the AI endpoint model list"),
+    };
+
+    let mut models: Vec<String> = envelope.data.into_iter().map(|m| m.id).collect();
+    models.sort();
+    AiModelsResponse::ok(models)
 }
 
 #[cfg(test)]
@@ -466,6 +574,60 @@ mod tests {
         .0;
         assert!(resp2.has_notify_token, "omitted token must not be cleared");
         assert_eq!(resp2.notify_scope, "both");
+    }
+
+    #[tokio::test]
+    async fn ai_endpoint_round_trips_and_is_exposed() {
+        let (state, _notes_dir, _db_dir) = test_state().await;
+
+        // Default surfaces before any write.
+        let resp = get_settings(State(state.clone()), RequireAuth("alice".to_string()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(resp.ai_endpoint, "https://litellm.osmosis.page/v1");
+        assert_eq!(resp.openrouter_model, "gpt-oss-20b");
+
+        let resp = put_settings(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            WithRejection(
+                Json(PutSettingsRequest {
+                    ai_endpoint: Some("https://proxy.example.com/v1".to_string()),
+                    ..Default::default()
+                }),
+                std::marker::PhantomData,
+            ),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(resp.ai_endpoint, "https://proxy.example.com/v1");
+    }
+
+    #[tokio::test]
+    async fn put_rejects_invalid_ai_endpoint() {
+        let (state, _notes_dir, _db_dir) = test_state().await;
+
+        for bad in ["ftp://nope", "not-a-url", "https://"] {
+            let err = put_settings(
+                State(state.clone()),
+                RequireAuth("alice".to_string()),
+                WithRejection(
+                    Json(PutSettingsRequest {
+                        ai_endpoint: Some(bad.to_string()),
+                        ..Default::default()
+                    }),
+                    std::marker::PhantomData,
+                ),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, AppError::BadRequest(_)),
+                "{bad:?} must reject"
+            );
+        }
     }
 
     #[tokio::test]

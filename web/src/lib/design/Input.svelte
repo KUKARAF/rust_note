@@ -11,8 +11,10 @@
 		prefix,
 		suffix,
 		readonly = false,
+		list,
 		onkeydown,
-		onclick
+		onclick,
+		onchange
 	}: {
 		value?: string;
 		type?: string;
@@ -23,8 +25,11 @@
 		prefix?: Snippet;
 		suffix?: Snippet;
 		readonly?: boolean;
+		/** Id of a `<datalist>` to wire up as a type-ahead source. */
+		list?: string;
 		onkeydown?: (event: KeyboardEvent) => void;
 		onclick?: (event: MouseEvent) => void;
+		onchange?: (event: Event) => void;
 	} = $props();
 </script>
 
@@ -42,10 +47,12 @@
 			{type}
 			{placeholder}
 			{readonly}
+			{list}
 			bind:value
 			bind:this={el}
 			{onkeydown}
 			{onclick}
+			{onchange}
 		/>
 		{#if suffix}
 			<span class="kv-input-suffix">{@render suffix()}</span>

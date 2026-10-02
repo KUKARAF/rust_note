@@ -10,12 +10,15 @@
 		setTheme,
 		setOpenrouterModel,
 		setOpenrouterKey,
+		setAiEndpoint,
+		fetchAiModels,
 		setNotifyEnabled,
 		setNotifyScope,
 		setNotifyPriority,
 		setNotifySchedule,
 		setNotifyEndpoint,
 		setNotifyToken,
+		DEFAULT_AI_ENDPOINT,
 		DEFAULT_NOTIFY_ENDPOINT,
 		type Theme,
 		type NotifyScope,
@@ -52,31 +55,98 @@
 		}
 	}
 
-	// --- AI / OpenRouter (powers the /todo natural-language query) -----------
-
-	// Suggestions for the dropdown; any valid `vendor/model` id is accepted by
-	// the backend, so this list isn't exhaustive.
-	const MODEL_SUGGESTIONS = [
-		'minimax/minimax-m3',
-		'openai/gpt-4o-mini',
-		'anthropic/claude-3.5-haiku',
-		'google/gemini-flash-1.5'
-	];
+	// --- AI / LiteLLM (powers the /todo natural-language query) --------------
 
 	let apiKeyInput = $state('');
 	let aiSaving = $state(false);
 	let aiError = $state<string | null>(null);
 	let aiSaved = $state<string | null>(null);
 
+	let aiEndpointInput = $state($settings.aiEndpoint);
+
+	// Same seed-once pattern as the notify endpoint below: the store starts out
+	// with a default and is overwritten once `GET /api/settings` resolves, so
+	// the field is seeded from the real value the first time it's available.
+	let aiEndpointSeeded = false;
+	$effect(() => {
+		if (!aiEndpointSeeded && !$settings.loading) {
+			aiEndpointInput = $settings.aiEndpoint;
+			aiEndpointSeeded = true;
+		}
+	});
+
+	let modelInput = $state($settings.openrouterModel);
+	let modelSeeded = false;
+	$effect(() => {
+		if (!modelSeeded && !$settings.loading) {
+			modelInput = $settings.openrouterModel;
+			modelSeeded = true;
+		}
+	});
+
+	// Model list for the type-ahead picker, loaded from the LiteLLM proxy via
+	// the backend (never fetched directly — the key lives server-side only).
+	let aiModels = $state<string[]>([]);
+	let aiModelsError = $state<string | null>(null);
+	let aiModelsLoading = $state(false);
+	// Guards the initial auto-fetch so it only runs once the real settings
+	// have arrived, not on every store update.
+	let aiModelsAutoFetched = false;
+
+	async function loadAiModels() {
+		if (!$settings.hasOpenrouterKey) {
+			aiModels = [];
+			aiModelsError = null;
+			return;
+		}
+		aiModelsLoading = true;
+		try {
+			const result = await fetchAiModels();
+			aiModels = result.models;
+			aiModelsError = result.error;
+		} catch (err) {
+			aiModels = [];
+			aiModelsError = 'Could not load the model list.';
+			console.error(err);
+		} finally {
+			aiModelsLoading = false;
+		}
+	}
+
+	$effect(() => {
+		if (!aiModelsAutoFetched && !$settings.loading) {
+			aiModelsAutoFetched = true;
+			if ($settings.hasOpenrouterKey) void loadAiModels();
+		}
+	});
+
 	async function chooseModel(model: string) {
-		if (aiSaving || model === $settings.openrouterModel) return;
+		const trimmed = model.trim();
+		if (aiSaving || trimmed === '' || trimmed === $settings.openrouterModel) return;
 		aiSaving = true;
 		aiError = null;
 		aiSaved = null;
 		try {
-			await setOpenrouterModel(model);
+			await setOpenrouterModel(trimmed);
 		} catch (err) {
 			aiError = 'Could not save the model.';
+			console.error(err);
+		} finally {
+			aiSaving = false;
+		}
+	}
+
+	async function saveAiEndpoint() {
+		if (aiSaving || aiEndpointInput.trim() === '') return;
+		aiSaving = true;
+		aiError = null;
+		aiSaved = null;
+		try {
+			await setAiEndpoint(aiEndpointInput.trim());
+			aiSaved = 'Endpoint saved.';
+			await loadAiModels();
+		} catch (err) {
+			aiError = 'Could not save the endpoint.';
 			console.error(err);
 		} finally {
 			aiSaving = false;
@@ -92,6 +162,7 @@
 			await setOpenrouterKey(apiKeyInput.trim());
 			apiKeyInput = '';
 			aiSaved = 'API key saved.';
+			await loadAiModels();
 		} catch (err) {
 			aiError = 'Could not save the API key.';
 			console.error(err);
@@ -109,6 +180,7 @@
 			await setOpenrouterKey('');
 			apiKeyInput = '';
 			aiSaved = 'API key cleared.';
+			await loadAiModels();
 		} catch (err) {
 			aiError = 'Could not clear the API key.';
 			console.error(err);
@@ -395,28 +467,44 @@
 	</section>
 
 	<section class="settings-section">
-		<h2 class="settings-section-title">AI · OpenRouter</h2>
+		<h2 class="settings-section-title">AI · LiteLLM</h2>
 		<p class="ai-help">
-			Powers the natural-language query on the <a href={resolve('/todo')}>Todos</a> board. Set a model
-			and an OpenRouter API key; the key is stored on the server and never shown again.
+			Powers the natural-language query on the <a href={resolve('/todo')}>Todos</a> board, via your
+			LiteLLM proxy. The key is stored on the server and never shown again.
 		</p>
 
 		<div class="ai-field">
-			<span class="ai-label">Model</span>
-			<div class="model-options">
-				{#each MODEL_SUGGESTIONS as m (m)}
-					<button
-						class="theme-option"
-						onclick={() => chooseModel(m)}
-						disabled={aiSaving}
-						aria-pressed={$settings.openrouterModel === m}
-					>
-						<Chip color="accent" variant={$settings.openrouterModel === m ? 'tint' : 'outline'}>
-							{m}{$settings.openrouterModel === m ? ' ✓' : ''}
-						</Chip>
-					</button>
-				{/each}
+			<span class="ai-label">Endpoint</span>
+			<div class="ai-key-row">
+				<Input placeholder={DEFAULT_AI_ENDPOINT} bind:value={aiEndpointInput} />
+				<Button variant="primary" size="sm" onclick={saveAiEndpoint} disabled={aiSaving}>
+					Save
+				</Button>
 			</div>
+		</div>
+
+		<div class="ai-field">
+			<span class="ai-label">Model</span>
+			{#if $settings.hasOpenrouterKey && !aiModelsError}
+				<Input
+					placeholder={aiModelsLoading ? 'Loading models…' : 'Search models…'}
+					list="ai-model-list"
+					bind:value={modelInput}
+					onchange={() => chooseModel(modelInput)}
+				/>
+				<datalist id="ai-model-list">
+					{#each aiModels as m (m)}
+						<option value={m}></option>
+					{/each}
+				</datalist>
+			{:else}
+				<p class="ai-current">{aiModelsError ?? 'Set an API key first.'}</p>
+				<Input
+					placeholder="vendor/model"
+					bind:value={modelInput}
+					onchange={() => chooseModel(modelInput)}
+				/>
+			{/if}
 			<p class="ai-current">Active: {$settings.openrouterModel}</p>
 		</div>
 
@@ -428,7 +516,7 @@
 			<div class="ai-key-row">
 				<Input
 					type="password"
-					placeholder={$settings.hasOpenrouterKey ? 'Replace key…' : 'sk-or-…'}
+					placeholder={$settings.hasOpenrouterKey ? 'Replace key…' : 'LiteLLM key…'}
 					bind:value={apiKeyInput}
 				/>
 				<Button variant="primary" size="sm" onclick={saveKey} disabled={aiSaving}>Save key</Button>

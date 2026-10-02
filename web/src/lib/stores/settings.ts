@@ -16,6 +16,8 @@ export interface SettingsState {
 	openrouterModel: string;
 	/** Whether an OpenRouter API key is stored server-side (never the key itself). */
 	hasOpenrouterKey: boolean;
+	/** Base URL of the LiteLLM (OpenAI-compatible) proxy used for AI requests. */
+	aiEndpoint: string;
 	/** Whether the priority-notify daily digest is enabled. */
 	notifyEnabled: boolean;
 	/** Base URL of the priority-notify server (path is appended server-side). */
@@ -36,6 +38,7 @@ interface SettingsResponse {
 	theme: Theme;
 	openrouter_model: string;
 	has_openrouter_key: boolean;
+	ai_endpoint: string;
 	notify_enabled: boolean;
 	notify_endpoint: string;
 	notify_priority: NotifyPriority;
@@ -46,6 +49,7 @@ interface SettingsResponse {
 
 const STORAGE_KEY = 'rust-note-theme';
 const DEFAULT_MODEL = 'minimax/minimax-m3';
+export const DEFAULT_AI_ENDPOINT = 'https://litellm.osmosis.page/v1';
 export const DEFAULT_NOTIFY_ENDPOINT = 'https://notifications.osmosis.page';
 export const DEFAULT_NOTIFY_SCHEDULE = 'FREQ=DAILY;BYHOUR=8;BYMINUTE=0';
 
@@ -75,6 +79,7 @@ export const settings = writable<SettingsState>({
 	theme: readCachedTheme(),
 	openrouterModel: DEFAULT_MODEL,
 	hasOpenrouterKey: false,
+	aiEndpoint: DEFAULT_AI_ENDPOINT,
 	notifyEnabled: false,
 	notifyEndpoint: DEFAULT_NOTIFY_ENDPOINT,
 	notifyPriority: 'high',
@@ -101,6 +106,7 @@ export async function loadSettings(): Promise<void> {
 			theme: result.theme,
 			openrouterModel: result.openrouter_model || DEFAULT_MODEL,
 			hasOpenrouterKey: result.has_openrouter_key,
+			aiEndpoint: result.ai_endpoint || DEFAULT_AI_ENDPOINT,
 			notifyEnabled: result.notify_enabled,
 			notifyEndpoint: result.notify_endpoint || DEFAULT_NOTIFY_ENDPOINT,
 			notifyPriority: result.notify_priority || 'high',
@@ -136,6 +142,26 @@ export async function setOpenrouterModel(model: string): Promise<void> {
 export async function setOpenrouterKey(key: string): Promise<void> {
 	const result = await apiPut<SettingsResponse>('/api/settings', { openrouter_api_key: key });
 	settings.update((s) => ({ ...s, hasOpenrouterKey: result.has_openrouter_key }));
+}
+
+export async function setAiEndpoint(endpoint: string): Promise<void> {
+	const result = await apiPut<SettingsResponse>('/api/settings', { ai_endpoint: endpoint });
+	settings.update((s) => ({ ...s, aiEndpoint: result.ai_endpoint }));
+}
+
+/** Result shape returned by `GET /api/ai/models`. */
+export interface AiModelsResult {
+	models: string[];
+	error: string | null;
+}
+
+/**
+ * Lists the models available on the configured LiteLLM proxy. Never throws on
+ * upstream failure — the backend always answers 200 with `error` set instead
+ * (e.g. "set an API key first"), so callers only need to branch on `error`.
+ */
+export function fetchAiModels(): Promise<AiModelsResult> {
+	return apiGet<AiModelsResult>('/api/ai/models');
 }
 
 // --- priority-notify digest ------------------------------------------------

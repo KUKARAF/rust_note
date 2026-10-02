@@ -1,5 +1,6 @@
 //! `POST /api/todos/query` — turn a natural-language request into a structured
-//! [`QuerySpec`] via OpenRouter. The spec is returned to the client and applied
+//! [`QuerySpec`] via the user's OpenAI-compatible AI endpoint (their LiteLLM
+//! proxy; see `docs/litellm.md`). The spec is returned to the client and applied
 //! there (see web `$lib/notes/todos.ts`); this endpoint never returns the todo
 //! list itself, so the LLM only ever sees the query text, not the notes.
 
@@ -163,16 +164,30 @@ async fn query_todos(
         k.clone()
     } else {
         return Err(AppError::BadRequest(
-            "No OpenRouter API key configured — add one in Settings.".to_string(),
+            "No AI API key configured — add one in Settings.".to_string(),
         ));
     };
 
-    let spec = call_openrouter(&settings.openrouter_model, &key, body.nl.trim()).await?;
+    let url = chat_url(&settings.ai_endpoint);
+    let spec = call_ai(&url, &settings.openrouter_model, &key, body.nl.trim()).await?;
     Ok(Json(spec))
 }
 
+/// The chat-completions URL for a configured AI endpoint: the endpoint with any
+/// trailing `/` trimmed, plus `/chat/completions`. Falls back to the default
+/// LiteLLM base if the endpoint is somehow empty.
+fn chat_url(endpoint: &str) -> String {
+    let base = endpoint.trim().trim_end_matches('/');
+    let base = if base.is_empty() {
+        store::DEFAULT_AI_ENDPOINT
+    } else {
+        base
+    };
+    format!("{base}/chat/completions")
+}
+
 #[derive(Debug, Deserialize)]
-struct OpenRouterResponse {
+struct ChatResponse {
     choices: Vec<Choice>,
 }
 #[derive(Debug, Deserialize)]
@@ -184,7 +199,7 @@ struct ChoiceMessage {
     content: Option<String>,
 }
 
-async fn call_openrouter(model: &str, key: &str, nl: &str) -> AppResult<QuerySpec> {
+async fn call_ai(url: &str, model: &str, key: &str, nl: &str) -> AppResult<QuerySpec> {
     let request_body = serde_json::json!({
         "model": model,
         "messages": [
@@ -196,7 +211,9 @@ async fn call_openrouter(model: &str, key: &str, nl: &str) -> AppResult<QuerySpe
     });
 
     // Harden the outbound client like the OIDC one: no redirects (SSRF), and a
-    // bounded timeout so a slow provider can't hold a request open.
+    // bounded timeout so a slow provider can't hold a request open. Only
+    // `Authorization: Bearer <key>` + `Content-Type: application/json` are sent
+    // (OpenAI-compatible); no endpoint-specific headers.
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(20))
@@ -204,38 +221,39 @@ async fn call_openrouter(model: &str, key: &str, nl: &str) -> AppResult<QuerySpe
         .map_err(|e| AppError::Internal(anyhow!("failed to build HTTP client: {e}")))?;
 
     let resp = client
-        .post("https://openrouter.ai/api/v1/chat/completions")
+        .post(url)
         .bearer_auth(key)
         .json(&request_body)
         .send()
         .await
-        .map_err(|e| AppError::Internal(anyhow!("OpenRouter request failed: {e}")))?;
+        .map_err(|e| AppError::Internal(anyhow!("request to the AI endpoint failed: {e}")))?;
 
     let status = resp.status();
     let raw = resp
         .text()
         .await
-        .map_err(|e| AppError::Internal(anyhow!("reading OpenRouter response failed: {e}")))?;
+        .map_err(|e| AppError::Internal(anyhow!("reading the AI endpoint response failed: {e}")))?;
 
     if !status.is_success() {
         if status.as_u16() == 401 {
             return Err(AppError::BadRequest(
-                "OpenRouter rejected the API key.".to_string(),
+                "The AI endpoint rejected the API key.".to_string(),
             ));
         }
         return Err(AppError::Internal(anyhow!(
-            "OpenRouter returned {status}: {raw}"
+            "the AI endpoint (LiteLLM) returned {status}: {raw}"
         )));
     }
 
-    let envelope: OpenRouterResponse = serde_json::from_str(&raw)
-        .map_err(|e| AppError::Internal(anyhow!("unexpected OpenRouter response: {e}")))?;
+    let envelope: ChatResponse = serde_json::from_str(&raw).map_err(|e| {
+        AppError::Internal(anyhow!("unexpected response from the AI endpoint: {e}"))
+    })?;
     let content = envelope
         .choices
         .into_iter()
         .next()
         .and_then(|c| c.message.content)
-        .ok_or_else(|| AppError::Internal(anyhow!("OpenRouter returned no content")))?;
+        .ok_or_else(|| AppError::Internal(anyhow!("the AI endpoint returned no content")))?;
 
     let json = extract_json(&content)
         .ok_or_else(|| AppError::Internal(anyhow!("no JSON object in model output")))?;
@@ -258,6 +276,24 @@ fn extract_json(content: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_url_appends_completions_path_and_trims_slash() {
+        assert_eq!(
+            chat_url("https://litellm.osmosis.page/v1"),
+            "https://litellm.osmosis.page/v1/chat/completions"
+        );
+        // Trailing slash (and surrounding whitespace) is trimmed before append.
+        assert_eq!(
+            chat_url("  https://litellm.osmosis.page/v1/  "),
+            "https://litellm.osmosis.page/v1/chat/completions"
+        );
+        // Empty endpoint falls back to the default LiteLLM base.
+        assert_eq!(
+            chat_url(""),
+            format!("{}/chat/completions", store::DEFAULT_AI_ENDPOINT)
+        );
+    }
 
     #[test]
     fn extract_json_handles_fenced_output() {
