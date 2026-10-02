@@ -29,6 +29,14 @@
 		type FoodCategory,
 		type FoodDay
 	} from '$lib/stats/stats';
+	import {
+		fetchPipeline,
+		needsAttention,
+		groupByStage,
+		isClosed,
+		relativeExpected,
+		type PipelineItem
+	} from '$lib/notes/pipeline';
 
 	let series = $state<Series[]>([]);
 	let loading = $state(true);
@@ -93,8 +101,39 @@
 		}
 	}
 
+	// ---- pipeline (leads + applications) --------------------------------------
+	// Separate load/loading/error state from the food/substance stats above:
+	// the two fetches are independent, so one failing shouldn't block the other.
+
+	let pipeItems = $state<PipelineItem[]>([]);
+	let pipeLoading = $state(true);
+	let pipeError = $state<string | null>(null);
+	const pipeNow = new Date();
+
+	async function loadPipeline() {
+		pipeLoading = true;
+		pipeError = null;
+		try {
+			pipeItems = await fetchPipeline('all', true);
+		} catch (err) {
+			if (err instanceof ApiError && err.status === 401) {
+				flagLoginRequired();
+				await goto(resolve('/login'));
+				return;
+			}
+			if (err instanceof ApiError && err.status === 0) {
+				pipeError = "You're offline — pipeline stats need a connection.";
+				return;
+			}
+			pipeError = err instanceof Error ? err.message : 'Failed to load pipeline';
+		} finally {
+			pipeLoading = false;
+		}
+	}
+
 	onMount(() => {
 		void loadAll();
+		void loadPipeline();
 	});
 
 	// ---- derived data --------------------------------------------------------
@@ -207,6 +246,76 @@
 	function toggleRow(key: string) {
 		expanded = { ...expanded, [key]: !expanded[key] };
 	}
+
+	// ---- pipeline derived data -------------------------------------------------
+
+	const pipeOpen = $derived(pipeItems.filter((i) => !isClosed(i)));
+	const pipeClosedCt = $derived(pipeItems.length - pipeOpen.length);
+	const pipeLeadsCt = $derived(pipeItems.filter((i) => i.kind === 'lead').length);
+	const pipeAppsCt = $derived(pipeItems.filter((i) => i.kind === 'application').length);
+
+	// Open items always have ball in ('ours' | 'theirs') — isClosed() treats
+	// ball === 'none' as closed — but we still tally all three defensively.
+	const ballCounts = $derived.by(() => {
+		const c: Record<'ours' | 'theirs' | 'none', number> = { ours: 0, theirs: 0, none: 0 };
+		for (const i of pipeOpen) c[i.ball]++;
+		return c;
+	});
+
+	// Full funnel breakdown, including closed stages, in the same vocabulary
+	// the /pipeline board uses (groupByStage orders by the funnel, unknowns last).
+	const stageGroups = $derived(groupByStage(pipeItems));
+	const stageMax = $derived(Math.max(1, ...stageGroups.map((g) => g.items.length)));
+
+	function daysUntil(item: PipelineItem): number | null {
+		if (!item.expected_at) return null;
+		const ms = Date.parse(item.expected_at);
+		if (Number.isNaN(ms)) return null;
+		return Math.floor((ms - pipeNow.getTime()) / 86_400_000);
+	}
+
+	interface DueBucket {
+		key: string;
+		label: string;
+		test: (d: number) => boolean;
+	}
+	const DUE_BUCKETS: DueBucket[] = [
+		{ key: 'overdue', label: 'Overdue', test: (d) => d < 0 },
+		{ key: 'd0', label: '0–2d', test: (d) => d >= 0 && d <= 2 },
+		{ key: 'd3', label: '3–7d', test: (d) => d >= 3 && d <= 7 },
+		{ key: 'd8', label: '8–30d', test: (d) => d >= 8 && d <= 30 },
+		{ key: 'later', label: 'Later', test: (d) => d > 30 }
+	];
+
+	interface DueBucketRow extends DueBucket {
+		count: number;
+		ramp: number; // 0-1, 1 = most urgent (overdue), used to mix the single-hue ramp
+	}
+	const dueBuckets = $derived.by<DueBucketRow[]>(() => {
+		const rows = DUE_BUCKETS.map((b, i) => ({
+			...b,
+			count: 0,
+			ramp: 1 - i / (DUE_BUCKETS.length - 1)
+		}));
+		for (const item of pipeOpen) {
+			const d = daysUntil(item);
+			if (d === null) continue;
+			const row = rows.find((b) => b.test(d));
+			if (row) row.count++;
+		}
+		return rows;
+	});
+	const pipeNoDateCt = $derived(pipeOpen.filter((i) => !i.expected_at).length);
+	const dueBucketMax = $derived(Math.max(1, pipeNoDateCt, ...dueBuckets.map((b) => b.count)));
+
+	const overdueCt = $derived(dueBuckets.find((b) => b.key === 'overdue')?.count ?? 0);
+	const due7Ct = $derived(
+		(dueBuckets.find((b) => b.key === 'd0')?.count ?? 0) +
+			(dueBuckets.find((b) => b.key === 'd3')?.count ?? 0)
+	);
+
+	// "Needs attention" — ball in play and past due, most overdue first.
+	const pipeAttention = $derived(needsAttention(pipeOpen).slice(0, 5));
 
 	// ---- formatting ----------------------------------------------------------
 	const WD = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -355,6 +464,150 @@
 				<FoodCalendar days={foodDays} {today} />
 			</section>
 
+			<!-- ===== PIPELINE ===== -->
+			<section>
+				<div class="sec-head">
+					<h2>Pipeline</h2>
+					<span class="aside">{pipeLeadsCt} leads · {pipeAppsCt} applications</span>
+				</div>
+				<div class="card">
+					{#if pipeLoading}
+						<p class="status">Loading…</p>
+					{:else if pipeError}
+						<p class="status error">{pipeError}</p>
+					{:else if pipeItems.length === 0}
+						<p class="status">Nothing in the pipeline yet.</p>
+					{:else}
+						<!-- headline: the "needs you" signals -->
+						<div class="today-stats">
+							<div class="tstat" class:hot={ballCounts.ours > 0}>
+								<div class="k"><span class="d" style:background="var(--up)"></span>Your move</div>
+								<div class="v" style:color={ballCounts.ours > 0 ? 'var(--up)' : undefined}>
+									{fmt(ballCounts.ours)}
+								</div>
+							</div>
+							<div class="tstat" class:hot={overdueCt > 0}>
+								<div class="k">
+									<span class="d" style:background="var(--critical)"></span>Overdue
+								</div>
+								<div class="v" style:color={overdueCt > 0 ? 'var(--critical)' : undefined}>
+									{fmt(overdueCt)}
+								</div>
+							</div>
+							<div class="tstat">
+								<div class="k"><span class="d" style:background="var(--ink-2)"></span>Due ≤7d</div>
+								<div class="v">{fmt(due7Ct)}</div>
+							</div>
+						</div>
+
+						<!-- by stage -->
+						<div class="pipe-sub">
+							<div class="pipe-sub-head">
+								By stage<span class="aside">{pipeOpen.length} open · {pipeClosedCt} closed</span>
+							</div>
+							<div class="prows">
+								{#each stageGroups as g (g.stage)}
+									<div class="prow">
+										<span class="plabel">{g.stage}</span>
+										<span class="pbar"
+											><i
+												style:width={`${Math.round((g.items.length / stageMax) * 100)}%`}
+												style:background="var(--ink-2)"
+											></i></span
+										>
+										<span class="pamt">{g.items.length}</span>
+									</div>
+								{/each}
+							</div>
+						</div>
+
+						<!-- by ball -->
+						<div class="pipe-sub">
+							<div class="pipe-sub-head">By ball</div>
+							<div class="prows">
+								<div class="prow">
+									<span class="plabel">Ours</span>
+									<span class="pbar"
+										><i
+											style:width={`${Math.round((ballCounts.ours / Math.max(1, pipeOpen.length)) * 100)}%`}
+											style:background="var(--up)"
+										></i></span
+									>
+									<span class="pamt">{ballCounts.ours}</span>
+								</div>
+								<div class="prow">
+									<span class="plabel">Theirs</span>
+									<span class="pbar"
+										><i
+											style:width={`${Math.round((ballCounts.theirs / Math.max(1, pipeOpen.length)) * 100)}%`}
+											style:background="var(--muted)"
+										></i></span
+									>
+									<span class="pamt">{ballCounts.theirs}</span>
+								</div>
+								<div class="prow">
+									<span class="plabel">None</span>
+									<span class="pbar"
+										><i
+											style:width={`${Math.round((ballCounts.none / Math.max(1, pipeOpen.length)) * 100)}%`}
+											style:background="var(--hair-strong)"
+										></i></span
+									>
+									<span class="pamt">{ballCounts.none}</span>
+								</div>
+							</div>
+						</div>
+
+						<!-- days until action -->
+						<div class="pipe-sub">
+							<div class="pipe-sub-head">
+								Days until action<span class="aside">open items with a date</span>
+							</div>
+							<div class="prows">
+								{#each dueBuckets as b (b.key)}
+									<div class="prow">
+										<span class="plabel">{b.label}</span>
+										<span class="pbar"
+											><i
+												style:width={`${Math.round((b.count / dueBucketMax) * 100)}%`}
+												style:background={`color-mix(in srgb, var(--critical) ${Math.round(b.ramp * 85)}%, var(--surface-2))`}
+											></i></span
+										>
+										<span class="pamt">{b.count}</span>
+									</div>
+								{/each}
+								<div class="prow muted">
+									<span class="plabel">No date</span>
+									<span class="pbar"
+										><i
+											style:width={`${Math.round((pipeNoDateCt / dueBucketMax) * 100)}%`}
+											style:background="var(--hair-strong)"
+										></i></span
+									>
+									<span class="pamt">{pipeNoDateCt}</span>
+								</div>
+							</div>
+						</div>
+
+						<!-- needs attention -->
+						{#if pipeAttention.length > 0}
+							<div class="pipe-sub">
+								<div class="pipe-sub-head">Needs attention</div>
+								<ul class="attn">
+									{#each pipeAttention as item (item.id)}
+										<li class="attn-row">
+											<span class="attn-co">{item.company}</span>
+											<span class="attn-stage">{item.stage ?? '—'}</span>
+											<span class="attn-when">{relativeExpected(item.expected_at, pipeNow)}</span>
+										</li>
+									{/each}
+								</ul>
+							</div>
+						{/if}
+					{/if}
+				</div>
+			</section>
+
 			<div class="foot">notes.osmosis.page · glanceable stats</div>
 		{/if}
 	</div>
@@ -375,6 +628,7 @@
 		--caffeine: #2a78d6;
 		--alcohol: #6a5cd0;
 		--sugar: #eb6834;
+		--critical: #c23b35;
 
 		/* food calendar: 3 hues x 4 sugar levels (light = darker means more sugar) */
 		--vegan-0: #c9ecc9;
@@ -427,6 +681,7 @@
 		--caffeine: #4f97ec;
 		--alcohol: #9d92ec;
 		--sugar: #f0805a;
+		--critical: #e2685f;
 		--vegan-0: #20351f;
 		--vegan-1: #2f7a34;
 		--vegan-2: #33ad3f;
@@ -603,6 +858,106 @@
 		font-weight: 500;
 		color: var(--muted);
 		margin-left: 2px;
+	}
+	.tstat.hot {
+		border-color: var(--hair-strong);
+	}
+
+	/* ---- pipeline sub-sections (stage / ball / due-date bars, needs attention) ---- */
+	.pipe-sub {
+		margin-top: 16px;
+	}
+	.pipe-sub:first-of-type {
+		margin-top: 14px;
+	}
+	.pipe-sub-head {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--ink-2);
+		margin-bottom: 6px;
+	}
+	.pipe-sub-head .aside {
+		font-weight: 400;
+		color: var(--muted);
+	}
+	.prows {
+		display: flex;
+		flex-direction: column;
+		gap: 0;
+	}
+	.prow {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 5px 0;
+		font-size: 13px;
+	}
+	.prow.muted {
+		color: var(--muted);
+	}
+	.prow .plabel {
+		width: 64px;
+		flex: none;
+		color: var(--ink-2);
+		text-transform: capitalize;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.prow .pbar {
+		flex: 1;
+		height: 8px;
+		border-radius: 4px;
+		background: var(--surface-2);
+		border: 1px solid var(--hair);
+		overflow: hidden;
+	}
+	.prow .pbar i {
+		display: block;
+		height: 100%;
+		border-radius: 4px;
+	}
+	.prow .pamt {
+		width: 24px;
+		flex: none;
+		text-align: right;
+		font-variant-numeric: tabular-nums;
+		color: var(--ink);
+		font-weight: 500;
+	}
+
+	.attn {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+	.attn-row {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		padding: 7px 0;
+		border-top: 1px dashed var(--hair);
+		font-size: 13px;
+	}
+	.attn-row:first-child {
+		border-top: 0;
+	}
+	.attn-co {
+		font-weight: 500;
+		color: var(--ink);
+	}
+	.attn-stage {
+		color: var(--muted);
+		text-transform: capitalize;
+	}
+	.attn-when {
+		margin-left: auto;
+		color: var(--critical);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
 	}
 
 	/* ---- substance rows ---- */
