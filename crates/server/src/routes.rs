@@ -60,7 +60,6 @@ pub fn build(state: AppState) -> Router {
         .merge(todos::query::router())
         .merge(pipeline::routes::router())
         .merge(settings::routes::router())
-        .merge(tts::routes::router())
         .merge(stats::routes::router())
         .merge(recurring::routes::router())
         .merge(share::router())
@@ -78,7 +77,14 @@ pub fn build(state: AppState) -> Router {
     // for their whole lifetime.
     let ws = collab::ws::router();
 
-    let app = api.merge(ws).with_state(state.clone());
+    // TTS synthesis (`POST /api/tts`) is also mounted OUTSIDE the 30s REST
+    // timeout layer: synthesizing a whole long note can take well over 30s and
+    // the handler already uses a dedicated reqwest client with its own longer
+    // (90s) timeout + an input-size cap, so it governs its own duration. Left
+    // in the REST layer it was cut off at 30s and surfaced a spurious 408.
+    let tts = tts::routes::router();
+
+    let app = api.merge(ws).merge(tts).with_state(state.clone());
 
     // Mount the MCP Streamable-HTTP server (`/mcp`) + its OAuth metadata,
     // outside the REST timeout/concurrency/body layers (like `ws`): its POST/GET

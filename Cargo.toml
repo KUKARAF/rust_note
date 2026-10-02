@@ -28,7 +28,13 @@ openidconnect = "4.0"
 # `reqwest` is already in the tree transitively via `openidconnect`; declaring
 # it here with `json` + `rustls-tls` pins the features we use. `default-features
 # = false` avoids pulling native-tls.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# `stream` enables `Response::bytes_stream()` for the `#AI!` streaming LLM call
+# (SSE). `default-features = false` still avoids pulling native-tls.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# Stream combinators (`StreamExt::next`) for consuming `reqwest`'s byte stream.
+# Added in the `#AI!` v2 streaming rework (already present transitively; now a
+# direct dep). The `std` default features are all that's needed.
+futures-util = "0.3"
 
 # Remote MCP server (Model Context Protocol) for LLM clients (litellm).
 # `rmcp` is the official Rust MCP SDK; we use its Streamable-HTTP server

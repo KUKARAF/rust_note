@@ -257,7 +257,7 @@ impl Drop for ConnGuard {
 async fn handle_socket(mut socket: WebSocket, state: AppState, room: Arc<Room>, can_write: bool) {
     let _guard = ConnGuard {
         room: room.clone(),
-        state,
+        state: state.clone(),
     };
     let conn_id = room.next_conn_id();
     let mut rx = room.subscribe();
@@ -287,7 +287,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, room: Arc<Room>, 
                         // Handle the frame (mutations + relays happen inside),
                         // then send any replies destined for this socket.
                         let replies = process_frame(
-                            &room, &data, conn_id, can_write, &mut controlled,
+                            &room, &state, &data, conn_id, can_write, &mut controlled,
                         );
                         if send_replies(&mut socket, replies).await.is_break() {
                             break;
@@ -379,6 +379,7 @@ async fn send_replies(socket: &mut WebSocket, replies: Vec<Vec<u8>>) -> ControlF
 /// back to *this* socket (e.g. a SyncStep2 in reply to a SyncStep1).
 fn process_frame(
     room: &Arc<Room>,
+    state: &AppState,
     data: &[u8],
     conn_id: u64,
     can_write: bool,
@@ -426,6 +427,11 @@ fn process_frame(
                     room.mark_dirty();
                     let frame = Message::Sync(SyncMessage::Update(update)).encode_v1();
                     room.broadcast_frame(conn_id, Bytes::from(frame));
+                    // Live `#AI!` trigger: fire the instant the user confirms a
+                    // command with Enter, instead of waiting for the 5s flush
+                    // (RC1). Server-side so it covers every client; the shared
+                    // in-flight guard dedupes against the flush backstop.
+                    crate::ai_command::maybe_spawn_live(room, state, &room.snapshot_text());
                 }
             }
             // Presence update: apply and relay (allowed even for read-only
@@ -483,7 +489,7 @@ mod tests {
         let step1 =
             Message::Sync(SyncMessage::SyncStep1(client.transact().state_vector())).encode_v1();
 
-        let replies = process_frame(&room, &step1, 1, true, &mut HashSet::new());
+        let replies = process_frame(&room, &state, &step1, 1, true, &mut HashSet::new());
         assert_eq!(replies.len(), 1, "expected a single SyncStep2 reply");
 
         // The reply is a SyncStep2 whose update brings the client in sync.
@@ -530,7 +536,7 @@ mod tests {
         };
         let frame = Message::Sync(SyncMessage::Update(update)).encode_v1();
 
-        let replies = process_frame(&room, &frame, 99, true, &mut HashSet::new());
+        let replies = process_frame(&room, &state, &frame, 99, true, &mut HashSet::new());
         assert!(replies.is_empty(), "an Update produces no direct reply");
         assert!(room.dirty.load(std::sync::atomic::Ordering::Acquire));
         assert!(room.snapshot_text().contains("appended "));
@@ -563,7 +569,7 @@ mod tests {
         let frame = Message::Awareness(peer.update().unwrap()).encode_v1();
 
         let mut controlled = HashSet::new();
-        let replies = process_frame(&room, &frame, 42, true, &mut controlled);
+        let replies = process_frame(&room, &state, &frame, 42, true, &mut controlled);
         assert!(replies.is_empty());
         assert!(controlled.contains(&peer_client), "client id tracked");
 
@@ -619,7 +625,7 @@ mod tests {
         };
         let frame = Message::Sync(SyncMessage::Update(update)).encode_v1();
 
-        let replies = process_frame(&room, &frame, 1, false, &mut HashSet::new());
+        let replies = process_frame(&room, &state, &frame, 1, false, &mut HashSet::new());
         assert!(replies.is_empty());
         assert_eq!(room.snapshot_text(), "start\n");
         assert!(!room.dirty.load(std::sync::atomic::Ordering::Acquire));

@@ -45,9 +45,11 @@ impl Op {
     }
 
     /// Produce the full new note text after applying this op to `old`, or
-    /// `None` if the op no longer validates against `old` (so the caller skips
-    /// it). Validation is re-checked here against the exact text the splice
-    /// will be computed from, closing any gap with [`Op::validate_and_offset`].
+    /// `None` if the op no longer validates against `old`. The live apply engine
+    /// now types each op out incrementally (see `apply.rs`) rather than in one
+    /// splice, so this whole-text form is retained as a validated reference used
+    /// by the op-model tests.
+    #[cfg(test)]
     pub fn apply_to(&self, old: &str) -> Option<String> {
         match self {
             Op::Replace { find, with } => {
@@ -64,6 +66,14 @@ impl Op {
             Op::Append { text } => Some(format!("{old}{text}")),
         }
     }
+}
+
+/// Delete the unique occurrence of `find` from `text`, returning the new text,
+/// or `None` if `find` is absent or ambiguous. Used by the animated apply
+/// engine to remove a `replace` op's old span before typing the new text in.
+pub fn remove_unique(text: &str, find: &str) -> Option<String> {
+    unique_match(text, find)?;
+    Some(text.replacen(find, "", 1))
 }
 
 /// Byte index of `needle` in `haystack` iff it occurs EXACTLY ONCE (and is
@@ -135,6 +145,31 @@ pub fn parse_ops(content: &str) -> Result<Vec<Op>, String> {
         .into_iter()
         .filter_map(RawOp::into_op)
         .collect())
+}
+
+/// Parse ONE JSONL op line (the Phase-2 streaming protocol: one JSON op per
+/// line, no envelope). Returns `None` for a blank line, a code-fence line, or
+/// any line without a well-formed, known op — so the incremental stream parser
+/// can simply skip it. Tolerates surrounding whitespace and a trailing comma
+/// (an array element the model emitted line-by-line) by extracting the first
+/// balanced `{ … }` object on the line.
+pub fn parse_op_line(line: &str) -> Option<Op> {
+    let obj = first_balanced_object(line)?;
+    let raw: RawOp = serde_json::from_str(obj).ok()?;
+    raw.into_op()
+}
+
+/// Parse a whole model response into ops, tolerant of either protocol: try the
+/// JSONL form first (one op per line — the current prompt), and if that yields
+/// nothing fall back to the legacy `{"ops":[ … ]}` envelope. Used by the
+/// non-streaming fallback path, which must cope with whichever shape the model
+/// returned.
+pub fn parse_ops_any(content: &str) -> Vec<Op> {
+    let jsonl: Vec<Op> = content.lines().filter_map(parse_op_line).collect();
+    if !jsonl.is_empty() {
+        return jsonl;
+    }
+    parse_ops(content).unwrap_or_default()
 }
 
 /// Return the first balanced `{ … }` object substring of `content`, honoring
@@ -231,6 +266,25 @@ pub fn locate_command(text: &str) -> Option<Command> {
         line_start += line_len + 1; // +1 for the '\n' that `split` consumed
     }
     None
+}
+
+/// True iff the note carries a command line that is **terminated by a
+/// newline** — i.e. the user pressed Enter to confirm it. This is the
+/// intentional, prompt live trigger ([`super::maybe_spawn_live`]): a marker on
+/// the final line with no trailing newline is still being typed and does NOT
+/// fire (the 5s flush backstop covers that case). Cheap, allocation-free scan.
+pub fn has_confirmed_command(text: &str) -> bool {
+    let mut line_start = 0usize;
+    for line in text.split('\n') {
+        let line_len = line.len();
+        if line.trim().ends_with(MARKER) {
+            // The '\n' that `split` consumed sits at `line_start + line_len`.
+            let line_end = line_start + line_len;
+            return text.as_bytes().get(line_end) == Some(&b'\n');
+        }
+        line_start += line_len + 1;
+    }
+    false
 }
 
 /// The note text with its command line removed, or `None` if there is no
@@ -354,6 +408,81 @@ mod tests {
             text: "!".into(),
         };
         assert_eq!(missing.validate_and_offset(text), None);
+    }
+
+    #[test]
+    fn parse_op_line_reads_one_op_per_line_and_skips_noise() {
+        // A clean JSONL line.
+        assert_eq!(
+            parse_op_line(r#"{"op":"replace","find":"a","with":"b"}"#),
+            Some(Op::Replace {
+                find: "a".into(),
+                with: "b".into()
+            })
+        );
+        // Leading indent + a trailing comma (array element emitted line-by-line).
+        assert_eq!(
+            parse_op_line("  {\"op\":\"append\",\"text\":\"\\nx\"},"),
+            Some(Op::Append { text: "\nx".into() })
+        );
+        // Noise lines a model might interleave: blank, code fence, envelope head.
+        assert_eq!(parse_op_line(""), None);
+        assert_eq!(parse_op_line("```json"), None);
+        assert_eq!(parse_op_line(r#"{"ops":["#), None);
+        assert_eq!(parse_op_line("]}"), None);
+        // Unknown op / missing field is dropped.
+        assert_eq!(parse_op_line(r#"{"op":"bogus","text":"x"}"#), None);
+        assert_eq!(parse_op_line(r#"{"op":"replace","with":"no find"}"#), None);
+    }
+
+    #[test]
+    fn parse_ops_any_handles_jsonl_and_envelope_fallback() {
+        // JSONL (the current streaming/prompt form).
+        let jsonl = "{\"op\":\"replace\",\"find\":\"old\",\"with\":\"new\"}\n\
+                     {\"op\":\"append\",\"text\":\"\\ntail\"}\n";
+        assert_eq!(
+            parse_ops_any(jsonl),
+            vec![
+                Op::Replace {
+                    find: "old".into(),
+                    with: "new".into()
+                },
+                Op::Append {
+                    text: "\ntail".into()
+                },
+            ]
+        );
+        // Legacy envelope still parses via the fallback.
+        let envelope = r#"{"ops":[{"op":"append","text":"z"}]}"#;
+        assert_eq!(
+            parse_ops_any(envelope),
+            vec![Op::Append { text: "z".into() }]
+        );
+        assert!(parse_ops_any("no json here").is_empty());
+    }
+
+    #[test]
+    fn has_confirmed_command_requires_trailing_newline() {
+        // Enter pressed: the marker line is followed by '\n'.
+        assert!(has_confirmed_command("body\nmake it terse #AI!\n"));
+        assert!(has_confirmed_command("body\n#AI!\nmore typing"));
+        // Still being typed: marker on the final line, no trailing newline.
+        assert!(!has_confirmed_command("body\nmake it terse #AI!"));
+        // No marker at all.
+        assert!(!has_confirmed_command("just a note\n"));
+        // Mid-line mention does not count (matches `locate_command`).
+        assert!(!has_confirmed_command("see #AI! for details\n"));
+    }
+
+    #[test]
+    fn remove_unique_deletes_only_unambiguous_matches() {
+        assert_eq!(
+            remove_unique("one two three", "two").as_deref(),
+            Some("one  three")
+        );
+        // Ambiguous / absent -> refuse.
+        assert_eq!(remove_unique("a a a", "a"), None);
+        assert_eq!(remove_unique("abc", "zzz"), None);
     }
 
     #[test]

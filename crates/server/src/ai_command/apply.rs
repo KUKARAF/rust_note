@@ -1,12 +1,18 @@
-//! The paced apply engine: play the model's ops into a live room one at a
-//! time, as if a collaborator named "AI" were typing.
+//! The animated apply engine: play the model's ops into a live room as if a
+//! collaborator named "AI" were typing.
 //!
-//! Each op is validated against the room's *current* text, the "AI" awareness
-//! cursor is moved to the edit site, the edit is spliced in via the same
-//! minimal-splice + broadcast path as `collab/write.rs::apply_text_edit`, and a
-//! short pause follows so connected editors see it land live. The awareness
-//! mutex is never held across an `.await` (the pause happens with the guard
-//! dropped).
+//! Each op is validated against the room's *current* text, then typed out in
+//! small grapheme-sized chunks via repeated minimal `collab/write.rs::
+//! apply_text_edit` splices, with the "AI" caret advancing between chunks and a
+//! short pause after each so connected editors watch the text appear live. The
+//! awareness `std::sync::Mutex` is never held across an `.await`:
+//! `apply_text_edit` and every awareness broadcast are fully synchronous, and
+//! the per-chunk `sleep` happens with no guard held.
+//!
+//! The "AI" presence (which lights the header "AI editing…" chip and draws the
+//! in-editor caret) is owned by an [`AiPresence`] RAII handle created at the
+//! very start of a run and retracted on drop — so it is up for the whole run,
+//! including the generation wait, not just the apply.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,10 +22,10 @@ use axum::body::Bytes;
 use yrs::sync::awareness::{AwarenessUpdate, AwarenessUpdateEntry};
 use yrs::sync::Message;
 use yrs::updates::encoder::Encode;
-use yrs::ClientID;
+use yrs::{Assoc, ClientID, IndexedSequence, Transact};
 
 use super::ops::Op;
-use crate::collab::room::Room;
+use crate::collab::room::{Room, CONTENT_FIELD};
 use crate::collab::write::apply_text_edit;
 
 /// Synthetic awareness client id for the "AI" collaborator. A fixed sentinel
@@ -30,68 +36,201 @@ const AI_CLIENT_ID: ClientID = ClientID::new(0x00A1_C0DE); // recognizable senti
 /// Cursor color for the "AI" collaborator (a distinct, warm orange).
 const AI_COLOR: &str = "#d9480f";
 
-/// Pause between ops so editors watch the note get edited live.
-const PACE: Duration = Duration::from_millis(70);
+/// Pause between typed chunks so editors watch the text appear live.
+const CHUNK_PACE: Duration = Duration::from_millis(28);
+
+/// Upper bound on typed chunks per op, so a whole-note rewrite still animates
+/// in bounded time: a longer insertion uses proportionally larger chunks
+/// rather than more ticks (short inserts type 1-few graphemes at a time).
+const MAX_TICKS_PER_OP: usize = 48;
 
 /// NULL marker string yrs uses to represent a removed awareness state.
 const AWARENESS_NULL: &str = "null";
 
-/// Apply `ops` in order to `room`, paced, as the "AI" cursor. Returns how many
-/// ops were actually applied (ambiguous / stale anchors are skipped + logged).
-///
-/// Publishes the "AI" presence entry while editing and clears it at the end.
-pub async fn apply_ops(room: &Arc<Room>, ops: &[Op]) -> usize {
-    // Seed the awareness clock above any residue from a previous run so our
-    // updates are always accepted (yrs ignores a state whose clock is stale).
-    let mut clock = {
-        let awareness = room.lock_awareness();
-        awareness.meta(AI_CLIENT_ID).map(|(c, _)| c).unwrap_or(0)
-    };
+/// RAII handle for the "AI" awareness presence. [`AiPresence::begin`] publishes
+/// the live presence (name "AI" + color → header chip) the instant a run
+/// starts; [`AiPresence::move_cursor`] moves the caret to each edit site as it
+/// types; the presence is retracted on [`Drop`], so every exit path of a run —
+/// including an early error return — clears it and leaves no ghost cursor.
+pub struct AiPresence {
+    room: Arc<Room>,
+    /// Monotonic awareness clock; yrs ignores a state with a stale clock, so it
+    /// must strictly increase across every update (seeded above prior residue).
+    clock: u32,
+}
 
-    let mut applied = 0usize;
-    for op in ops {
-        let current = room.snapshot_text();
-        let Some(offset) = op.validate_and_offset(&current) else {
-            tracing::info!(
-                note_id = %room.note_id,
-                "ai_command: skipping op with absent/ambiguous anchor"
-            );
-            continue;
+impl AiPresence {
+    /// Publish the initial "AI thinking" presence (no caret yet) and return the
+    /// handle that holds it for the rest of the run.
+    pub fn begin(room: &Arc<Room>) -> Self {
+        let seed = {
+            let awareness = room.lock_awareness();
+            awareness.meta(AI_CLIENT_ID).map(|(c, _)| c).unwrap_or(0)
         };
-
-        // Move the "AI" cursor to this edit before splicing it in.
-        clock += 1;
-        broadcast_ai_state(room, presence_json(offset), clock);
-
-        if apply_text_edit(room, |old| op.apply_to(old)) {
-            applied += 1;
-            tokio::time::sleep(PACE).await;
+        let clock = seed + 1;
+        broadcast_ai_state(room, thinking_json(), clock);
+        Self {
+            room: room.clone(),
+            clock,
         }
     }
 
-    // Retract the "AI" presence so no ghost cursor lingers.
-    clock += 1;
-    broadcast_ai_state(room, AWARENESS_NULL.to_string(), clock);
+    /// Move the "AI" caret to `offset` (a byte offset into the current text),
+    /// encoding a real Yjs cursor so y-codemirror renders a labeled caret.
+    pub fn move_cursor(&mut self, offset: usize) {
+        self.clock += 1;
+        let json = cursor_presence_json(&self.room, offset);
+        broadcast_ai_state(&self.room, json, self.clock);
+    }
+}
 
+impl Drop for AiPresence {
+    fn drop(&mut self) {
+        // Retract so no ghost "AI" cursor/chip lingers after the run.
+        self.clock += 1;
+        broadcast_ai_state(&self.room, AWARENESS_NULL.to_string(), self.clock);
+    }
+}
+
+/// Apply a list of `ops` in order through `presence`, animated. Returns how
+/// many ops were actually applied (ambiguous / stale anchors are skipped).
+pub async fn apply_all(room: &Arc<Room>, presence: &mut AiPresence, ops: &[Op]) -> usize {
+    let mut applied = 0usize;
+    for op in ops {
+        if apply_op(room, presence, op).await {
+            applied += 1;
+        }
+    }
     applied
 }
 
-/// The "AI" presence state as a JSON string.
-///
-/// The MUST-have is live presence (name "AI" + a distinct color) so
-/// `y-codemirror` renders the "AI" collaborator. `aiCursorOffset` carries the
-/// byte offset of the current edit as a hint.
-///
-/// TODO(ai-command): render a precise remote *caret*. y-codemirror positions
-/// cursors from a `cursor: { anchor, head }` pair of `Y.RelativePosition`
-/// JSON, not a byte offset; encoding that from the server is the deferred
-/// "fiddly" part called out in the contract. v1 ships presence only.
-fn presence_json(offset: usize) -> String {
+/// Apply a single op, typed out grapheme-by-grapheme as the "AI" caret. Returns
+/// `false` (skipped, logged) if the op's anchor is absent/ambiguous in the
+/// room's *current* text — re-validated here so a stale op from a stream is
+/// dropped safely rather than corrupting the note.
+pub async fn apply_op(room: &Arc<Room>, presence: &mut AiPresence, op: &Op) -> bool {
+    let current = room.snapshot_text();
+    let Some(offset) = op.validate_and_offset(&current) else {
+        tracing::info!(
+            note_id = %room.note_id,
+            "ai_command: skipping op with absent/ambiguous anchor"
+        );
+        return false;
+    };
+
+    // Move the caret to the edit site before touching the text.
+    presence.move_cursor(offset);
+
+    match op {
+        Op::Replace { find, with } => {
+            // Delete the old span first (one splice, re-validating uniqueness),
+            // then type the replacement in at that same position.
+            let find = find.clone();
+            if !apply_text_edit(room, move |old| super::ops::remove_unique(old, &find)) {
+                return false; // raced away / became ambiguous
+            }
+            type_at(room, presence, offset, with).await;
+        }
+        Op::InsertAfter { text, .. } => type_at(room, presence, offset, text).await,
+        Op::Append { text } => type_at(room, presence, offset, text).await,
+    }
+    true
+}
+
+/// Apply `ops` in order to `room` as the "AI" cursor, managing the presence for
+/// the duration. Retained for the self-contained apply path and tests; the live
+/// run manages its own [`AiPresence`] across the whole run (see `mod.rs`).
+#[cfg(test)]
+pub async fn apply_ops(room: &Arc<Room>, ops: &[Op]) -> usize {
+    let mut presence = AiPresence::begin(room);
+    apply_all(room, &mut presence, ops).await
+    // `presence` drops here → retract.
+}
+
+/// Type `text` into the room starting at byte `start`, in grapheme-sized
+/// chunks, advancing the "AI" caret after each chunk. Each tick is a sync
+/// `apply_text_edit` splice followed by a `sleep` taken with no lock held. Stops
+/// early (without panicking) if the insertion point is no longer a valid char
+/// boundary — e.g. a concurrent human edit shifted the text under us.
+async fn type_at(room: &Arc<Room>, presence: &mut AiPresence, start: usize, text: &str) {
+    let mut pos = start;
+    for piece in grapheme_chunks(text) {
+        let at = pos;
+        let piece_len = piece.len();
+        let applied = apply_text_edit(room, move |old| {
+            let before = old.get(..at)?;
+            let after = old.get(at..)?;
+            Some(format!("{before}{piece}{after}"))
+        });
+        if !applied {
+            break;
+        }
+        pos += piece_len;
+        presence.move_cursor(pos);
+        tokio::time::sleep(CHUNK_PACE).await;
+    }
+}
+
+/// Split `text` into char-aligned chunks for typing. Chunk size scales with
+/// length so a short insertion types a grapheme or few at a time while a long
+/// one still finishes within [`MAX_TICKS_PER_OP`] ticks. Char-boundary safe (no
+/// byte slicing), so it never splits a multi-byte grapheme.
+fn grapheme_chunks(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    let per = chars.len().div_ceil(MAX_TICKS_PER_OP).max(1);
+    chars.chunks(per).map(|c| c.iter().collect()).collect()
+}
+
+/// The "AI thinking" presence (live, no caret) — drives the header chip the
+/// instant a run starts, before any edit site is known.
+fn thinking_json() -> String {
     serde_json::json!({
         "user": { "name": "AI", "color": AI_COLOR },
-        "aiCursorOffset": offset,
     })
     .to_string()
+}
+
+/// The "AI" presence state with a caret at byte `offset`, as a JSON string.
+///
+/// Carries `user` (name "AI" + color) so y-codemirror renders the collaborator,
+/// a real Yjs `cursor: { anchor, head }` of encoded `StickyIndex` relative
+/// positions so it draws a labeled caret that moves as the AI types, and
+/// `aiCursorOffset` as a plain byte-offset hint for any non-y-codemirror
+/// consumer. The caret field is omitted if a relative position can't be encoded
+/// for the offset (e.g. offset 0 / empty doc), leaving presence + chip intact.
+fn cursor_presence_json(room: &Arc<Room>, offset: usize) -> String {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "user".to_string(),
+        serde_json::json!({ "name": "AI", "color": AI_COLOR }),
+    );
+    map.insert("aiCursorOffset".to_string(), serde_json::json!(offset));
+    if let Some(cursor) = encode_cursor(room, offset) {
+        map.insert(
+            "cursor".to_string(),
+            serde_json::json!({ "anchor": cursor, "head": cursor }),
+        );
+    }
+    serde_json::Value::Object(map).to_string()
+}
+
+/// Encode a Yjs-compatible relative position (`StickyIndex`) for `offset` in
+/// the room's content text. yrs' `StickyIndex` serializes to exactly the JSON
+/// shape y-codemirror feeds to `Y.createAbsolutePositionFromRelativePosition`
+/// (`{"item":{"client","clock"},"assoc":0}`, or `{"tname":"content","assoc":0}`
+/// at the start), so this needs no frontend change. Locks the awareness mutex
+/// only for the brief, synchronous read (never across an `.await`).
+fn encode_cursor(room: &Arc<Room>, offset: usize) -> Option<serde_json::Value> {
+    let awareness = room.lock_awareness();
+    let doc = awareness.doc();
+    let text = doc.get_or_insert_text(CONTENT_FIELD);
+    let txn = doc.transact();
+    let index = u32::try_from(offset).ok()?;
+    let sticky = text.sticky_index(&txn, index, Assoc::After)?;
+    serde_json::to_value(&sticky).ok()
 }
 
 /// Apply an "AI"-client awareness entry to the room and broadcast it. A `json`
@@ -186,6 +325,59 @@ mod tests {
             rx.try_recv().is_ok(),
             "edits + cursor must be broadcast to the room"
         );
+    }
+
+    #[tokio::test]
+    async fn apply_op_types_incrementally_and_publishes_a_caret() {
+        // Simulates the streaming path: ops fed one at a time through a
+        // long-lived presence, each typed out with a real moving caret.
+        let room = room_with_text("Hello world.\n");
+        let mut presence = AiPresence::begin(&room);
+
+        let applied = apply_op(
+            &room,
+            &mut presence,
+            &Op::InsertAfter {
+                find: "world.".into(),
+                text: " Goodbye.".into(),
+            },
+        )
+        .await;
+        assert!(applied, "a valid op applies");
+        assert_eq!(room.snapshot_text(), "Hello world. Goodbye.\n");
+
+        // While the presence is live it carries a real Yjs caret (cursor:
+        // {anchor, head}) plus the "AI" user — what y-codemirror renders.
+        let state: serde_json::Value = {
+            let awareness = room.lock_awareness();
+            awareness.state(AI_CLIENT_ID).expect("AI presence is live")
+        };
+        assert_eq!(state["user"]["name"], "AI");
+        assert!(
+            state["cursor"]["anchor"]["assoc"].is_number(),
+            "a StickyIndex-encoded caret is published: {state}"
+        );
+        assert!(state["cursor"]["head"].is_object());
+
+        // A second op whose anchor is ambiguous is skipped, not applied.
+        let skipped = apply_op(
+            &room,
+            &mut presence,
+            &Op::Replace {
+                find: "o".into(),
+                with: "0".into(),
+            },
+        )
+        .await;
+        assert!(!skipped, "ambiguous anchor is skipped");
+        assert_eq!(room.snapshot_text(), "Hello world. Goodbye.\n");
+
+        drop(presence);
+        let cleared: Option<serde_json::Value> = {
+            let awareness = room.lock_awareness();
+            awareness.state(AI_CLIENT_ID)
+        };
+        assert!(cleared.is_none(), "presence retracts on drop");
     }
 
     #[tokio::test]

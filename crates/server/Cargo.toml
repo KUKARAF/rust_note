@@ -28,6 +28,7 @@ openidconnect = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
+futures-util = { workspace = true }
 
 # Remote MCP server (see workspace manifest for rationale).
 rmcp = { workspace = true }
