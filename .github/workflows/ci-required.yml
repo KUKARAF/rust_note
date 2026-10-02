@@ -45,6 +45,11 @@ concurrency:
   group: ci-required-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege default: this workflow only ever reads the repo (checkout,
+# build, test). Neither job writes PR comments, releases, or packages.
+permissions:
+  contents: read
+
 jobs:
   rust:
     name: Rust (fmt, build, test, panic-safety clippy)
