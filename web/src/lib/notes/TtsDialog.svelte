@@ -20,7 +20,7 @@
 	import { onDestroy } from 'svelte';
 	import { rawFetch } from '$lib/api/client';
 	import { fetchAiModels } from '$lib/stores/settings';
-	import { chunkText, MAX_TOTAL_WORDS } from './ttsChunk';
+	import { chunkText, MAX_TOTAL_WORDS, MAX_WORDS_PER_CHUNK } from './ttsChunk';
 	import Card from '$lib/design/Card.svelte';
 	import Button from '$lib/design/Button.svelte';
 
@@ -41,8 +41,38 @@
 
 	// --- Chunked playback state -------------------------------------------
 
-	/** How many chunks beyond the currently-playing one to keep pre-fetched. */
-	const PREFETCH_AHEAD = 2;
+	/** Default for how many chunks beyond the currently-playing one to keep pre-fetched. */
+	const DEFAULT_PREFETCH_AHEAD = 2;
+
+	// --- Advanced (user-tunable) settings ----------------------------------
+	// Live-editable from the "Advanced" disclosure, but only taken into account
+	// the next time playback (re)starts from a stopped/idle/done/error state —
+	// see `play()`. This keeps mid-playback state simple: no re-chunking or
+	// resizing the prefetch window out from under an in-flight buffer.
+
+	let maxWordsPerChunk = $state(MAX_WORDS_PER_CHUNK);
+	let prefetchAhead = $state(DEFAULT_PREFETCH_AHEAD);
+
+	const MIN_WORDS_PER_CHUNK = 5;
+	const MAX_WORDS_PER_CHUNK_BOUND = 500;
+	const MIN_PREFETCH_AHEAD = 1;
+	const MAX_PREFETCH_AHEAD = 10;
+
+	function clampInt(n: number, min: number, max: number): number {
+		if (!Number.isFinite(n)) return min;
+		return Math.min(max, Math.max(min, Math.round(n)));
+	}
+
+	function onMaxWordsChange() {
+		maxWordsPerChunk = clampInt(maxWordsPerChunk, MIN_WORDS_PER_CHUNK, MAX_WORDS_PER_CHUNK_BOUND);
+	}
+
+	function onPrefetchAheadChange() {
+		prefetchAhead = clampInt(prefetchAhead, MIN_PREFETCH_AHEAD, MAX_PREFETCH_AHEAD);
+	}
+
+	/** Cheap preview of how many chunks the current cap would produce, for the Advanced panel. */
+	let previewChunkCount = $derived(chunkText(text, { maxWordsPerChunk }).chunks.length);
 
 	type ChunkStatus = 'idle' | 'loading' | 'ready' | 'error' | 'done';
 
@@ -134,9 +164,9 @@
 		}
 	}
 
-	/** Kick off fetches for every idle chunk in [currentIndex, currentIndex + PREFETCH_AHEAD]. */
+	/** Kick off fetches for every idle chunk in [currentIndex, currentIndex + prefetchAhead]. */
 	function ensurePrefetch() {
-		const end = Math.min(currentIndex + PREFETCH_AHEAD, chunks.length - 1);
+		const end = Math.min(currentIndex + prefetchAhead, chunks.length - 1);
 		for (let i = currentIndex; i <= end; i++) {
 			const slot = slots[i];
 			if (slot && slot.status === 'idle') void fetchChunk(i);
@@ -229,7 +259,7 @@
 		// an error. Re-chunk (text doesn't change while the dialog is open, but
 		// this keeps the fresh-start path self-contained) and reset everything.
 		abortAndRevokeAll();
-		const result = chunkText(text);
+		const result = chunkText(text, { maxWordsPerChunk });
 		if (result.chunks.length === 0) {
 			playState = 'error';
 			playError = 'There is no text to read.';
@@ -314,6 +344,42 @@
 							{/each}
 						</select>
 					</label>
+
+					<details class="rt-advanced">
+						<summary class="rt-advanced-summary">Advanced</summary>
+						<div class="rt-advanced-body">
+							<label class="rt-field">
+								<span class="rt-field-label">Max words per chunk</span>
+								<input
+									class="rt-number"
+									type="number"
+									min={MIN_WORDS_PER_CHUNK}
+									max={MAX_WORDS_PER_CHUNK_BOUND}
+									step="1"
+									bind:value={maxWordsPerChunk}
+									onchange={onMaxWordsChange}
+									disabled={playState !== 'idle'}
+								/>
+							</label>
+							<label class="rt-field">
+								<span class="rt-field-label">Buffer size (chunks ahead)</span>
+								<input
+									class="rt-number"
+									type="number"
+									min={MIN_PREFETCH_AHEAD}
+									max={MAX_PREFETCH_AHEAD}
+									step="1"
+									bind:value={prefetchAhead}
+									onchange={onPrefetchAheadChange}
+									disabled={playState !== 'idle'}
+								/>
+							</label>
+							<p class="rt-hint">
+								{previewChunkCount} chunk{previewChunkCount === 1 ? '' : 's'} at this cap · takes effect
+								on next Play
+							</p>
+						</div>
+					</details>
 
 					{#if truncatedNotice}
 						<p class="rt-hint">{truncatedNotice}</p>
@@ -458,6 +524,53 @@
 	}
 
 	.rt-select:disabled {
+		opacity: 0.6;
+	}
+
+	.rt-advanced {
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-control);
+		padding: var(--space-3);
+	}
+
+	.rt-advanced-summary {
+		cursor: pointer;
+		font-family: var(--font-pixel);
+		font-size: var(--type-label);
+		letter-spacing: var(--tracking-pixel);
+		text-transform: uppercase;
+		color: var(--kv-dim);
+		user-select: none;
+	}
+
+	.rt-advanced-summary:hover {
+		color: var(--kv-ink);
+	}
+
+	.rt-advanced-body {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+		margin-top: var(--space-3);
+	}
+
+	.rt-number {
+		width: 6rem;
+		background: var(--surface-input);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-control);
+		padding: 7px 9px;
+		font-family: var(--font-term);
+		font-size: var(--type-body);
+		color: var(--kv-ink);
+	}
+
+	.rt-number:focus {
+		outline: none;
+		border-color: var(--kv-accent);
+	}
+
+	.rt-number:disabled {
 		opacity: 0.6;
 	}
 
