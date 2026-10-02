@@ -95,6 +95,13 @@
 	let drawingEditorOpen = $state(false);
 	let peerEditingDrawing = $state(false);
 
+	// `#AI!` live-edit indicator: the server publishes a synthetic "AI" awareness
+	// entry (user.name === 'AI') while it's splicing edits into this note's CRDT
+	// (see docs/ai-command.md). The edits themselves render automatically via
+	// yCollab — this just surfaces a small "AI editing…" affordance, same
+	// pattern as `peerEditingDrawing` above.
+	let aiEditing = $state(false);
+
 	// Stale-CRDT repair: collab rooms seed from the server's persisted CRDT
 	// state, which for drawings can predate the server-side migration to bare
 	// scene JSON (disk is authoritative for drawings). When the live doc has
@@ -188,6 +195,7 @@
 	function refreshPeers(sess: CollabSession) {
 		const list: PresencePeer[] = [];
 		let otherDrawing = false;
+		let aiPresent = false;
 		sess.awareness.getStates().forEach((state, clientId) => {
 			// Soft-lock signal: some OTHER client has the drawing editor open.
 			if (clientId !== localClientId) {
@@ -196,6 +204,7 @@
 			}
 			const user = (state as { user?: { name?: string; color?: string } }).user;
 			if (!user) return;
+			if (user.name === 'AI') aiPresent = true;
 			list.push({
 				clientId,
 				name: user.name ?? 'Anonymous',
@@ -207,6 +216,7 @@
 		list.sort((a, b) => (a.self === b.self ? a.clientId - b.clientId : a.self ? -1 : 1));
 		peers = list;
 		peerEditingDrawing = otherDrawing;
+		aiEditing = aiPresent;
 	}
 
 	// Single lifecycle effect keyed on the note path: load via REST, then join
@@ -440,6 +450,12 @@
 				>
 			</h1>
 			<div class="editor-header-actions">
+				{#if aiEditing}
+					<span class="ai-editing-chip" title="#AI! is applying edits to this note">
+						<PulsingDot color="var(--kv-accent)" />
+						<span>AI editing…</span>
+					</span>
+				{/if}
 				<CollabPresence {peers} />
 				{#if isDailyNote && session && editorReady}
 					<Button variant="outline" size="sm" onclick={() => (trackDialogOpen = true)}>Track</Button
@@ -592,6 +608,15 @@
 		align-items: center;
 		gap: var(--space-5);
 		flex: 0 0 auto;
+	}
+
+	.ai-editing-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-3);
+		font-family: var(--font-term);
+		font-size: var(--type-meta);
+		color: var(--kv-accent);
 	}
 
 	.folder {

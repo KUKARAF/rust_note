@@ -14,6 +14,8 @@ export interface SettingsState {
 	theme: Theme;
 	/** OpenRouter model id used for natural-language todo queries. */
 	openrouterModel: string;
+	/** OpenRouter model id used for `#AI!` in-note inline edits. */
+	aiCommandModel: string;
 	/** Whether an OpenRouter API key is stored server-side (never the key itself). */
 	hasOpenrouterKey: boolean;
 	/** Base URL of the LiteLLM (OpenAI-compatible) proxy used for AI requests. */
@@ -37,6 +39,7 @@ export interface SettingsState {
 interface SettingsResponse {
 	theme: Theme;
 	openrouter_model: string;
+	ai_command_model: string;
 	has_openrouter_key: boolean;
 	ai_endpoint: string;
 	notify_enabled: boolean;
@@ -49,6 +52,8 @@ interface SettingsResponse {
 
 const STORAGE_KEY = 'rust-note-theme';
 const DEFAULT_MODEL = 'minimax/minimax-m3';
+/** Default for `ai_command_model` — benchmarked clean + fast for `#AI!` edits. */
+export const DEFAULT_AI_COMMAND_MODEL = 'openrouter/google/gemini-3.1-flash-lite';
 export const DEFAULT_AI_ENDPOINT = 'https://litellm.osmosis.page/v1';
 export const DEFAULT_NOTIFY_ENDPOINT = 'https://notifications.osmosis.page';
 export const DEFAULT_NOTIFY_SCHEDULE = 'FREQ=DAILY;BYHOUR=8;BYMINUTE=0';
@@ -78,6 +83,7 @@ function cacheTheme(theme: Theme): void {
 export const settings = writable<SettingsState>({
 	theme: readCachedTheme(),
 	openrouterModel: DEFAULT_MODEL,
+	aiCommandModel: DEFAULT_AI_COMMAND_MODEL,
 	hasOpenrouterKey: false,
 	aiEndpoint: DEFAULT_AI_ENDPOINT,
 	notifyEnabled: false,
@@ -105,6 +111,7 @@ export async function loadSettings(): Promise<void> {
 		settings.set({
 			theme: result.theme,
 			openrouterModel: result.openrouter_model || DEFAULT_MODEL,
+			aiCommandModel: result.ai_command_model || DEFAULT_AI_COMMAND_MODEL,
 			hasOpenrouterKey: result.has_openrouter_key,
 			aiEndpoint: result.ai_endpoint || DEFAULT_AI_ENDPOINT,
 			notifyEnabled: result.notify_enabled,
@@ -136,6 +143,11 @@ export async function setTheme(theme: Theme): Promise<void> {
 export async function setOpenrouterModel(model: string): Promise<void> {
 	const result = await apiPut<SettingsResponse>('/api/settings', { openrouter_model: model });
 	settings.update((s) => ({ ...s, openrouterModel: result.openrouter_model }));
+}
+
+export async function setAiCommandModel(model: string): Promise<void> {
+	const result = await apiPut<SettingsResponse>('/api/settings', { ai_command_model: model });
+	settings.update((s) => ({ ...s, aiCommandModel: result.ai_command_model }));
 }
 
 /** Save (or, with an empty string, clear) the OpenRouter API key. */

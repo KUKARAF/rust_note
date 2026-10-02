@@ -1,3 +1,4 @@
+mod ai_command;
 mod auth;
 mod collab;
 mod config;

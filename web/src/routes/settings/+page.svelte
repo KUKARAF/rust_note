@@ -9,6 +9,7 @@
 		settings,
 		setTheme,
 		setOpenrouterModel,
+		setAiCommandModel,
 		setOpenrouterKey,
 		setAiEndpoint,
 		fetchAiModels,
@@ -84,6 +85,17 @@
 		}
 	});
 
+	// Command model — the same picker/list, but a separate field + setting
+	// (`ai_command_model`) that only drives `#AI!` inline note edits.
+	let commandModelInput = $state($settings.aiCommandModel);
+	let commandModelSeeded = false;
+	$effect(() => {
+		if (!commandModelSeeded && !$settings.loading) {
+			commandModelInput = $settings.aiCommandModel;
+			commandModelSeeded = true;
+		}
+	});
+
 	// Model list for the type-ahead picker, loaded from the LiteLLM proxy via
 	// the backend (never fetched directly — the key lives server-side only).
 	let aiModels = $state<string[]>([]);
@@ -130,6 +142,22 @@
 			await setOpenrouterModel(trimmed);
 		} catch (err) {
 			aiError = 'Could not save the model.';
+			console.error(err);
+		} finally {
+			aiSaving = false;
+		}
+	}
+
+	async function chooseCommandModel(model: string) {
+		const trimmed = model.trim();
+		if (aiSaving || trimmed === '' || trimmed === $settings.aiCommandModel) return;
+		aiSaving = true;
+		aiError = null;
+		aiSaved = null;
+		try {
+			await setAiCommandModel(trimmed);
+		} catch (err) {
+			aiError = 'Could not save the command model.';
 			console.error(err);
 		} finally {
 			aiSaving = false;
@@ -478,8 +506,8 @@
 	<section class="settings-section">
 		<h2 class="settings-section-title">AI · LiteLLM</h2>
 		<p class="ai-help">
-			Powers the natural-language query on the <a href={resolve('/todo')}>Todos</a> board, via your
-			LiteLLM proxy. The key is stored on the server and never shown again.
+			Powers the natural-language query on the <a href={resolve('/todo')}>Todos</a> board, via your LiteLLM
+			proxy. The key is stored on the server and never shown again.
 		</p>
 
 		<div class="ai-field">
@@ -515,6 +543,27 @@
 				/>
 			{/if}
 			<p class="ai-current">Active: {$settings.openrouterModel}</p>
+		</div>
+
+		<div class="ai-field">
+			<span class="ai-label">Command model</span>
+			<p class="ai-help">Used by <code>#AI!</code> inline edits inside notes.</p>
+			{#if $settings.hasOpenrouterKey && !aiModelsError}
+				<Input
+					placeholder={aiModelsLoading ? 'Loading models…' : 'Search models…'}
+					list="ai-model-list"
+					bind:value={commandModelInput}
+					onchange={() => chooseCommandModel(commandModelInput)}
+				/>
+			{:else}
+				<p class="ai-current">{aiModelsError ?? 'Set an API key first.'}</p>
+				<Input
+					placeholder="vendor/model"
+					bind:value={commandModelInput}
+					onchange={() => chooseCommandModel(commandModelInput)}
+				/>
+			{/if}
+			<p class="ai-current">Active: {$settings.aiCommandModel}</p>
 		</div>
 
 		<div class="ai-field">

@@ -116,6 +116,10 @@ pub async fn flush_room(room: &Arc<Room>, state: &AppState) -> anyhow::Result<()
     }
 
     let text = room.snapshot_text();
+    // `#AI!` detection hook: if the flushed body carries the marker, kick off
+    // the (spawned, non-blocking) inline-edit orchestration. Must not block
+    // this flush — `maybe_spawn` only scans + spawns.
+    crate::ai_command::maybe_spawn(room, state, &text);
     // Full CRDT state, captured alongside the text so a later reap can rebuild
     // the room with the same CRDT identity (see `Room::snapshot_state`).
     let crdt = room.snapshot_state();

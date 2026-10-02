@@ -30,6 +30,8 @@ pub fn router() -> Router<AppState> {
 struct SettingsResponse {
     theme: String,
     openrouter_model: String,
+    /// Model id used by the in-note `#AI!` inline-edit command.
+    ai_command_model: String,
     /// Whether an AI (LiteLLM) API key is stored. The key itself is NEVER
     /// returned — the client only needs to know if one is set.
     has_openrouter_key: bool,
@@ -52,6 +54,7 @@ impl SettingsResponse {
         Self {
             theme: s.theme.clone(),
             openrouter_model: s.openrouter_model.clone(),
+            ai_command_model: s.ai_command_model.clone(),
             has_openrouter_key: !s.openrouter_api_key.is_empty(),
             ai_endpoint: s.ai_endpoint.clone(),
             notify_enabled: s.notify_enabled,
@@ -70,6 +73,9 @@ impl SettingsResponse {
 struct PutSettingsRequest {
     theme: Option<String>,
     openrouter_model: Option<String>,
+    /// Model id for the in-note `#AI!` command; validated like
+    /// `openrouter_model` (format, not an allowlist).
+    ai_command_model: Option<String>,
     openrouter_api_key: Option<String>,
     /// Base URL of the OpenAI-compatible AI endpoint; validated as an http(s)
     /// URL (non-secret).
@@ -111,6 +117,13 @@ async fn put_settings(
         if !is_valid_model_id(model) {
             return Err(AppError::BadRequest(
                 "invalid OpenRouter model id".to_string(),
+            ));
+        }
+    }
+    if let Some(model) = &body.ai_command_model {
+        if !is_valid_model_id(model) {
+            return Err(AppError::BadRequest(
+                "invalid #AI! command model id".to_string(),
             ));
         }
     }
@@ -172,6 +185,9 @@ async fn put_settings(
     }
     if let Some(model) = &body.openrouter_model {
         fm.set("openrouter_model", model);
+    }
+    if let Some(model) = &body.ai_command_model {
+        fm.set("ai_command_model", model);
     }
     // A key sent (even empty, to clear it) is written; omitted leaves it as-is.
     if let Some(key) = &body.openrouter_api_key {
@@ -606,6 +622,38 @@ mod tests {
         .unwrap()
         .0;
         assert_eq!(resp.ai_endpoint, "https://proxy.example.com/v1");
+    }
+
+    #[tokio::test]
+    async fn ai_command_model_round_trips_and_is_exposed() {
+        let (state, _notes_dir, _db_dir) = test_state().await;
+
+        // Default surfaces before any write.
+        let resp = get_settings(State(state.clone()), RequireAuth("alice".to_string()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            resp.ai_command_model,
+            store::DEFAULT_AI_COMMAND_MODEL,
+            "default #AI! command model is exposed"
+        );
+
+        let resp = put_settings(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            WithRejection(
+                Json(PutSettingsRequest {
+                    ai_command_model: Some("openai/gpt-4o-mini".to_string()),
+                    ..Default::default()
+                }),
+                std::marker::PhantomData,
+            ),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(resp.ai_command_model, "openai/gpt-4o-mini");
     }
 
     #[tokio::test]

@@ -16,6 +16,10 @@ pub struct UserSettings {
     /// OpenRouter model id used for the natural-language todo query, e.g.
     /// `openai/gpt-4o-mini`.
     pub openrouter_model: String,
+    /// Model id used by the in-note `#AI!` inline-edit command (see
+    /// `docs/ai-command.md`). Separate from `openrouter_model` so the cheap,
+    /// fast model that drives live edits can differ from the todo-query model.
+    pub ai_command_model: String,
     /// OpenRouter API key. Stored here (server-side) and never returned by the
     /// settings GET — see `SettingsResponse`.
     pub openrouter_api_key: String,
@@ -51,6 +55,7 @@ impl Default for UserSettings {
         Self {
             theme: "ration".to_string(),
             openrouter_model: DEFAULT_OPENROUTER_MODEL.to_string(),
+            ai_command_model: DEFAULT_AI_COMMAND_MODEL.to_string(),
             openrouter_api_key: String::new(),
             ai_endpoint: DEFAULT_AI_ENDPOINT.to_string(),
             notify_enabled: false,
@@ -100,6 +105,11 @@ pub const DEFAULT_AI_ENDPOINT: &str = "https://litellm.osmosis.page/v1";
 /// catalog changes over time.
 pub const DEFAULT_OPENROUTER_MODEL: &str = "gpt-oss-20b";
 
+/// Default model for the in-note `#AI!` inline-edit command. A small, fast
+/// model (benchmarked clean + ~1s latency); see `docs/ai-command.md`. Governed
+/// by [`is_valid_model_id`] (format, not an allowlist) like `openrouter_model`.
+pub const DEFAULT_AI_COMMAND_MODEL: &str = "openrouter/google/gemini-3.1-flash-lite";
+
 /// Whether `model` is a plausible OpenRouter model id: non-empty, bounded, and
 /// only `vendor/model`-style characters. Deliberately permissive (format, not
 /// membership) so new models aren't rejected.
@@ -135,6 +145,7 @@ fn default_note_content() -> String {
     };
     fm.set("theme", &UserSettings::default().theme);
     fm.set("openrouter_model", DEFAULT_OPENROUTER_MODEL);
+    fm.set("ai_command_model", DEFAULT_AI_COMMAND_MODEL);
     fm.render()
 }
 
@@ -151,6 +162,11 @@ pub fn parse_settings_tolerant(content: &str) -> UserSettings {
         .get("openrouter_model")
         .filter(|m| is_valid_model_id(m))
         .unwrap_or(DEFAULT_OPENROUTER_MODEL)
+        .to_string();
+    let ai_command_model = fm
+        .get("ai_command_model")
+        .filter(|m| is_valid_model_id(m))
+        .unwrap_or(DEFAULT_AI_COMMAND_MODEL)
         .to_string();
     let openrouter_api_key = fm.get("openrouter_api_key").unwrap_or("").to_string();
     let ai_endpoint = fm
@@ -192,6 +208,7 @@ pub fn parse_settings_tolerant(content: &str) -> UserSettings {
     UserSettings {
         theme,
         openrouter_model,
+        ai_command_model,
         openrouter_api_key,
         ai_endpoint,
         notify_enabled,
@@ -441,6 +458,28 @@ mod tests {
         assert_eq!(s.openrouter_model, "gpt-oss-20b");
         assert_eq!(UserSettings::default().openrouter_model, "gpt-oss-20b");
         assert_eq!(UserSettings::default().ai_endpoint, DEFAULT_AI_ENDPOINT);
+    }
+
+    #[test]
+    fn ai_command_model_defaults_and_round_trips() {
+        // Absent -> default.
+        let s = parse_settings_tolerant("---\ntheme: ration\n---\n");
+        assert_eq!(s.ai_command_model, DEFAULT_AI_COMMAND_MODEL);
+        assert_eq!(
+            UserSettings::default().ai_command_model,
+            DEFAULT_AI_COMMAND_MODEL
+        );
+
+        // Present + valid -> preserved.
+        let s = parse_settings_tolerant(
+            "---\ntheme: ration\nai_command_model: openai/gpt-4o-mini\n---\n",
+        );
+        assert_eq!(s.ai_command_model, "openai/gpt-4o-mini");
+
+        // Present but invalid -> falls back to default.
+        let s =
+            parse_settings_tolerant("---\ntheme: ration\nai_command_model: \"has spaces!\"\n---\n");
+        assert_eq!(s.ai_command_model, DEFAULT_AI_COMMAND_MODEL);
     }
 
     #[test]
