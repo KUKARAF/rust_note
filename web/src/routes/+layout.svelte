@@ -16,6 +16,8 @@
 	import { openTodayNote } from '$lib/notes/daily';
 	import Button from '$lib/design/Button.svelte';
 	import BlinkingCursor from '$lib/design/BlinkingCursor.svelte';
+	import Toast from '$lib/design/Toast.svelte';
+	import { toastState } from '$lib/design/toasts';
 	import { get } from 'svelte/store';
 
 	let { children } = $props();
@@ -221,6 +223,12 @@
 <MirrorFolderDialog open={mirrorPromptOpen} onclose={() => (mirrorPromptOpen = false)} />
 <CommandPalette open={paletteOpen} onclose={() => (paletteOpen = false)} />
 
+{#if $toastState}
+	<div class="toast-host">
+		<Toast message={$toastState.message} color={$toastState.color} showCursor={false} />
+	</div>
+{/if}
+
 <style>
 	.app-shell {
 		display: flex;
@@ -302,5 +310,15 @@
 	/* App build: no top bar, so the content itself must clear the status bar. */
 	.app-shell.app-mode .app-content {
 		padding-top: calc(var(--screen-gutter) + var(--safe-top));
+	}
+
+	/* Global toast host: above the command palette (z-index 200) so a delete
+	   command's result is visible even if it ran from inside the palette. */
+	.toast-host {
+		position: fixed;
+		left: 50%;
+		bottom: calc(var(--space-7) + var(--safe-bottom));
+		transform: translateX(-50%);
+		z-index: 300;
 	}
 </style>

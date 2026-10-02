@@ -9,7 +9,13 @@
 	import { IS_APP } from '$lib/api/deviceToken';
 	import { auth } from '$lib/stores/auth';
 	import { readNotesListCache } from '$lib/stores/offline';
-	import { buildActions, filterItems, type NoteMeta, type PaletteItem } from './items';
+	import {
+		buildActions,
+		filterItems,
+		MAX_NOTE_RESULTS,
+		type NoteMeta,
+		type PaletteItem
+	} from './items';
 	import Card from '$lib/design/Card.svelte';
 	import Chip from '$lib/design/Chip.svelte';
 	import Input from '$lib/design/Input.svelte';
@@ -52,9 +58,13 @@
 	});
 
 	// Actions + matching notes come from the shared palette module, so this
-	// modal and the /notes inline search stay one implementation.
+	// modal and the /notes inline search stay one implementation. The last
+	// argument drops a deleted note from this palette's own note pool so it
+	// disappears immediately, without waiting for the next open's refetch.
 	const items = $derived<PaletteItem[]>(
-		filterItems(query, buildActions({ user: $auth.user }), notes)
+		filterItems(query, buildActions({ user: $auth.user }), notes, MAX_NOTE_RESULTS, (id) => {
+			notes = notes.filter((n) => n.id !== id);
+		})
 	);
 
 	// Keep the selection in range whenever the item list changes.
@@ -154,6 +164,7 @@
 										type="button"
 										class="palette-item"
 										data-selected={index === selectedIndex}
+										data-destructive={item.destructive === true}
 										onclick={() => void runItem(item)}
 										onmousemove={() => (selectedIndex = index)}
 									>
@@ -162,7 +173,14 @@
 											<span class="palette-item-hint">{item.hint}</span>
 										{/if}
 										<span class="palette-item-chip">
-											<Chip color={item.group === 'action' ? 'accent' : 'dim'} variant="outline">
+											<Chip
+												color={item.destructive
+													? 'danger'
+													: item.group === 'action'
+														? 'accent'
+														: 'dim'}
+												variant="outline"
+											>
 												{item.group}
 											</Chip>
 										</span>
@@ -239,6 +257,19 @@
 	.palette-item[data-selected='true'] {
 		background: color-mix(in srgb, var(--kv-accent) 10%, transparent);
 		border-left-color: var(--kv-accent);
+	}
+
+	.palette-item[data-destructive='true'] {
+		color: var(--kv-danger);
+	}
+
+	.palette-item[data-destructive='true'] .palette-item-hint {
+		color: color-mix(in srgb, var(--kv-danger) 70%, var(--kv-dim));
+	}
+
+	.palette-item[data-destructive='true'][data-selected='true'] {
+		background: color-mix(in srgb, var(--kv-danger) 10%, transparent);
+		border-left-color: var(--kv-danger);
 	}
 
 	.palette-item-label {

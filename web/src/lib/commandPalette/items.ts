@@ -5,7 +5,7 @@
 import { writable } from 'svelte/store';
 import { goto } from '$app/navigation';
 import { resolve } from '$app/paths';
-import { apiPost } from '$lib/api/client';
+import { apiPost, apiDelete } from '$lib/api/client';
 import { IS_APP } from '$lib/api/deviceToken';
 import { encodeNotePath } from '$lib/notes/path';
 import { openTodayNote } from '$lib/notes/daily';
@@ -13,6 +13,7 @@ import { EMPTY_SCENE } from '$lib/notes/excalidraw';
 import { chooseMirrorFolder, mirrorAllSyncedNotes } from '$lib/app/noteMirror';
 import { logout } from '$lib/app/logout';
 import { startLogin } from '$lib/app/login';
+import { toast } from '$lib/design/toasts';
 import type { AuthUser } from '$lib/stores/auth';
 
 export interface NoteMeta {
@@ -28,8 +29,13 @@ export interface PaletteItem {
 	label: string;
 	hint?: string;
 	group: 'action' | 'note';
+	/** Renders in red (e.g. "delete"). Only ever one such item at a time. */
+	destructive?: boolean;
 	run: () => void | Promise<void>;
 }
+
+/** Matches a `delete <target>` query; group 1 is the (untrimmed) target text. */
+const DELETE_QUERY_RE = /^delete\s+(.+)$/i;
 
 /** Notes shown in the modal palette are capped so a huge vault doesn't flood it. */
 export const MAX_NOTE_RESULTS = 12;
@@ -153,18 +159,22 @@ export function buildActions(ctx: { user: AuthUser | null }): PaletteItem[] {
 }
 
 /**
- * Merge matching commands + notes into one list: matching actions first, then
- * matching notes. Empty query shows everything. `noteLimit` caps the notes
- * (the modal palette passes `MAX_NOTE_RESULTS`; the /notes page passes
- * `Infinity` to show the whole vault).
+ * Merge matching commands + notes into one list: a `delete <target>` action
+ * first (if the query parses as one), then matching actions, then matching
+ * notes. Empty query shows everything. `noteLimit` caps the notes (the modal
+ * palette passes `MAX_NOTE_RESULTS`; the /notes page passes `Infinity` to
+ * show the whole vault). `onNoteDeleted` lets each surface drop the deleted
+ * note from its own `notes` state/cache once the delete command succeeds.
  */
 export function filterItems(
 	query: string,
 	actions: PaletteItem[],
 	notes: NoteMeta[],
-	noteLimit = MAX_NOTE_RESULTS
+	noteLimit = MAX_NOTE_RESULTS,
+	onNoteDeleted?: (id: string) => void
 ): PaletteItem[] {
-	const q = query.trim().toLowerCase();
+	const trimmedQuery = query.trim();
+	const q = trimmedQuery.toLowerCase();
 	const matchedActions =
 		q === '' ? actions : actions.filter((a) => a.label.toLowerCase().includes(q));
 	const matchedNotes = (
@@ -180,5 +190,54 @@ export function filterItems(
 			group: 'note',
 			run: () => goto(resolve(`/notes/${encodeNotePath(n.id)}`))
 		}));
-	return [...matchedActions, ...matchedNotes];
+
+	const deleteMatch = DELETE_QUERY_RE.exec(trimmedQuery);
+	const deleteItems: PaletteItem[] = [];
+	if (deleteMatch) {
+		const target = deleteMatch[1].trim();
+		deleteItems.push({
+			id: 'delete-note',
+			label: `Delete "${target}"`,
+			hint: 'type the full filename to confirm',
+			group: 'action',
+			destructive: true,
+			run: () => deleteNoteByExactName(target, notes, onNoteDeleted)
+		});
+	}
+
+	return [...deleteItems, ...matchedActions, ...matchedNotes];
+}
+
+/**
+ * The full-filename requirement IS the confirmation step (no separate confirm
+ * dialog): only an exact (trimmed, case-insensitive) match on a note's `id`
+ * or `title` deletes anything. A partial, nonexistent, or ambiguous target
+ * (matching more than one distinct note) is a no-op beyond a toast — clicking
+ * the destructive item without the full filename must never delete.
+ */
+async function deleteNoteByExactName(
+	target: string,
+	notes: NoteMeta[],
+	onNoteDeleted?: (id: string) => void
+): Promise<void> {
+	const targetLower = target.trim().toLowerCase();
+	const matches = notes.filter(
+		(n) => n.id.toLowerCase() === targetLower || n.title.toLowerCase() === targetLower
+	);
+	const uniqueMatches = [...new Map(matches.map((n) => [n.id, n])).values()];
+	if (uniqueMatches.length !== 1) {
+		toast('Type the full filename to delete');
+		return;
+	}
+	const note = uniqueMatches[0];
+	try {
+		await apiDelete(`/api/notes/${encodeNotePath(note.id)}`);
+		toast(`Deleted "${note.title}"`);
+		onNoteDeleted?.(note.id);
+		if (window.location.pathname === resolve(`/notes/${encodeNotePath(note.id)}`)) {
+			await goto(resolve('/notes'));
+		}
+	} catch (err) {
+		toast(err instanceof Error ? err.message : 'Failed to delete note');
+	}
 }

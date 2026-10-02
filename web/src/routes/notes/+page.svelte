@@ -40,9 +40,14 @@
 	let listEl: HTMLUListElement | undefined = $state();
 
 	// Unified command + note list, from the same builder the modal palette uses.
-	// No note cap here (Infinity) — this is the full vault, not a launcher.
+	// No note cap here (Infinity) — this is the full vault, not a launcher. The
+	// last argument drops a deleted note from the list (and its offline cache)
+	// the moment the delete command succeeds.
 	const items = $derived<PaletteItem[]>(
-		filterItems(filter, buildActions({ user: $auth.user }), notes, Infinity)
+		filterItems(filter, buildActions({ user: $auth.user }), notes, Infinity, (id) => {
+			notes = notes.filter((n) => n.id !== id);
+			cacheNotesList(notes);
+		})
 	);
 	const noteCount = $derived(items.filter((i) => i.group === 'note').length);
 
@@ -259,6 +264,7 @@
 							class="row"
 							data-selected={index === selectedIndex}
 							class:selected={index === selectedIndex}
+							class:destructive={item.destructive === true}
 							onmouseenter={() => (selectedIndex = index)}
 							onclick={() => void item.run()}
 						>
@@ -269,7 +275,10 @@
 								<span class="row-hint" title={item.hint}>{item.hint}</span>
 							{/if}
 							<span class="row-chip">
-								<Chip color={item.group === 'action' ? 'accent' : 'dim'} variant="outline">
+								<Chip
+									color={item.destructive ? 'danger' : item.group === 'action' ? 'accent' : 'dim'}
+									variant="outline"
+								>
 									{item.group}
 								</Chip>
 							</span>
@@ -344,6 +353,16 @@
 	.row.selected {
 		background: rgba(121, 242, 121, 0.07);
 		border-left: 2px solid var(--kv-accent);
+	}
+
+	.row.destructive .row-label {
+		color: var(--kv-danger);
+	}
+
+	.row.destructive:hover,
+	.row.destructive.selected {
+		background: color-mix(in srgb, var(--kv-danger) 8%, transparent);
+		border-left-color: var(--kv-danger);
 	}
 
 	.row-label {
