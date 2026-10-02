@@ -48,6 +48,44 @@
 	let models = $state<string[]>([]);
 	let selectedModel = $state('');
 
+	// --- Autoplay preference -------------------------------------------------
+	// Persisted client-side pref, same pattern as the theme cache in
+	// stores/settings.ts (best-effort localStorage, never throws). When on,
+	// playback auto-starts as soon as a model is loaded/selected — see the
+	// `$effect` near `play()` below.
+
+	const AUTOPLAY_STORAGE_KEY = 'tts_autoplay';
+
+	function readAutoplayPref(): boolean {
+		try {
+			return localStorage.getItem(AUTOPLAY_STORAGE_KEY) === 'true';
+		} catch {
+			// localStorage unavailable (privacy mode etc.) — default OFF
+			return false;
+		}
+	}
+
+	function cacheAutoplayPref(value: boolean): void {
+		try {
+			localStorage.setItem(AUTOPLAY_STORAGE_KEY, String(value));
+		} catch {
+			// best-effort only
+		}
+	}
+
+	let autoplay = $state(readAutoplayPref());
+
+	function toggleAutoplay() {
+		autoplay = !autoplay;
+		cacheAutoplayPref(autoplay);
+	}
+
+	// Plain (non-reactive) guard: this component instance is created fresh each
+	// time the modal opens, so this naturally resets per-open without needing
+	// to key off any "modal opened" event. Ensures the auto-start effect below
+	// fires at most once per open, and never re-fires after a user Stop.
+	let autoplayStarted = false;
+
 	// --- Chunked playback state -------------------------------------------
 
 	/** Default max number of concurrent in-flight /api/tts synthesis requests. */
@@ -321,6 +359,20 @@
 		pumpScheduler();
 	}
 
+	// When Autoplay is on, start playback automatically as soon as the
+	// preconditions Play itself requires are met (models loaded + a model
+	// selected), without the user clicking Play — on open if already met, or
+	// as soon as `loadModels()` resolves. Guarded by `autoplayStarted` so this
+	// fires once per modal-open: it only controls the initial start, not
+	// pause/resume/stop or the chunk-to-chunk auto-advance.
+	$effect(() => {
+		if (!autoplay || autoplayStarted) return;
+		if (loadState === 'ok' && selectedModel && playState === 'idle') {
+			autoplayStarted = true;
+			play();
+		}
+	});
+
 	function pause() {
 		audioEl?.pause();
 		if (playState === 'playing') playState = 'paused';
@@ -469,19 +521,32 @@
 					></audio>
 
 					<div class="rt-actions">
-						{#if playState === 'playing'}
-							<Button variant="primary" size="sm" onclick={pause}>Pause</Button>
-						{:else if playState === 'paused'}
-							<Button variant="primary" size="sm" onclick={play}>Resume</Button>
-						{:else if playState === 'buffering'}
-							<Button variant="primary" size="sm" disabled>Buffering…</Button>
-						{:else if playState === 'done'}
-							<Button variant="primary" size="sm" onclick={play}>Replay</Button>
-						{:else}
-							<Button variant="primary" size="sm" disabled={!selectedModel} onclick={play}>
-								Play
-							</Button>
-						{/if}
+						<div class="rt-split" role="group" aria-label="Autoplay and play">
+							<button
+								type="button"
+								class="rt-split-toggle"
+								class:is-active={autoplay}
+								aria-pressed={autoplay}
+								onclick={toggleAutoplay}
+								title="Auto-start playback as soon as it's ready"
+							>
+								<span class="rt-split-toggle-dot" aria-hidden="true"></span>
+								Autoplay
+							</button>
+							{#if playState === 'playing'}
+								<Button variant="primary" size="sm" onclick={pause}>Pause</Button>
+							{:else if playState === 'paused'}
+								<Button variant="primary" size="sm" onclick={play}>Resume</Button>
+							{:else if playState === 'buffering'}
+								<Button variant="primary" size="sm" disabled>Buffering…</Button>
+							{:else if playState === 'done'}
+								<Button variant="primary" size="sm" onclick={play}>Replay</Button>
+							{:else}
+								<Button variant="primary" size="sm" disabled={!selectedModel} onclick={play}>
+									Play
+								</Button>
+							{/if}
+						</div>
 						<Button variant="outline" size="sm" disabled={playState === 'idle'} onclick={stop}>
 							Stop
 						</Button>
@@ -674,5 +739,60 @@
 	.rt-actions {
 		display: flex;
 		gap: var(--space-4);
+	}
+
+	/* Connected (segmented) Autoplay + Play control: shared border, no gap. */
+	.rt-split {
+		display: inline-flex;
+		align-items: stretch;
+	}
+
+	.rt-split :global(.kv-button) {
+		border-top-left-radius: 0;
+		border-bottom-left-radius: 0;
+	}
+
+	.rt-split-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 10px;
+		font-family: var(--font-pixel);
+		font-size: 8px;
+		text-transform: uppercase;
+		letter-spacing: var(--tracking-pixel);
+		border: 1px solid var(--border-accent);
+		border-right: none;
+		border-top-left-radius: var(--radius-control);
+		border-bottom-left-radius: var(--radius-control);
+		background: transparent;
+		color: var(--kv-accent);
+		cursor: pointer;
+		white-space: nowrap;
+		transition:
+			background-color 120ms linear,
+			color 120ms linear,
+			opacity 120ms linear;
+	}
+
+	.rt-split-toggle:hover {
+		opacity: 0.82;
+	}
+
+	.rt-split-toggle.is-active {
+		background: var(--kv-accent);
+		color: var(--kv-accent-ink);
+	}
+
+	.rt-split-toggle-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: currentColor;
+		opacity: 0.4;
+	}
+
+	.rt-split-toggle.is-active .rt-split-toggle-dot {
+		opacity: 1;
 	}
 </style>
