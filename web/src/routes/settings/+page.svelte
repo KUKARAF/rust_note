@@ -502,7 +502,7 @@
 					onchange={() => chooseModel(modelInput)}
 				/>
 				<datalist id="ai-model-list">
-					{#each aiModels as m (m)}
+					{#each aiModels as m}
 						<option value={m}></option>
 					{/each}
 				</datalist>

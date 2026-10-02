@@ -314,6 +314,9 @@ async fn get_ai_models(
 
     let mut models: Vec<String> = envelope.data.into_iter().map(|m| m.id).collect();
     models.sort();
+    // LiteLLM can list the same id more than once (aliases / duplicate entries);
+    // dedup so the client's keyed {#each} never sees a duplicate key.
+    models.dedup();
     AiModelsResponse::ok(models)
 }
 
