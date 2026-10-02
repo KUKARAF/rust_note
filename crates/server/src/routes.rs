@@ -5,7 +5,8 @@ use std::time::Duration;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::routing::get;
-use axum::Router;
+use axum::{Json, Router};
+use serde::Serialize;
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::timeout::TimeoutLayer;
@@ -51,6 +52,7 @@ pub fn build(state: AppState) -> Router {
     // REST/API surface: timeout + body limit + a global concurrency ceiling.
     let api = Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/api/version", get(version))
         .merge(auth::oidc::router())
         .merge(notes::routes::router())
         .merge(todos::routes::router())
@@ -98,6 +100,23 @@ pub fn build(state: AppState) -> Router {
         }
         None => app,
     }
+}
+
+/// Build/version info surfaced in the Settings footer so it's unambiguous which
+/// image is running. The git sha is baked into the image at build time by the
+/// Dockerfile (`ARG GIT_SHA` → `ENV RUSTNOTE_BUILD_SHA`), which the CI
+/// `docker-publish` workflow fills from `github.sha`. Falls back to `"dev"` for
+/// local runs where the env var is unset. Public (no auth) — it leaks nothing.
+#[derive(Serialize)]
+struct VersionInfo {
+    sha: String,
+    short_sha: String,
+}
+
+async fn version() -> Json<VersionInfo> {
+    let sha = std::env::var("RUSTNOTE_BUILD_SHA").unwrap_or_else(|_| "dev".to_string());
+    let short_sha = sha.chars().take(7).collect::<String>();
+    Json(VersionInfo { sha, short_sha })
 }
 
 #[cfg(test)]

@@ -41,13 +41,18 @@ WORKDIR /app
 COPY --from=backend /app/target/release/server /app/server
 COPY --from=frontend /app/web/build /app/static
 
+# Git sha baked in by CI (docker-publish passes --build-arg GIT_SHA=${github.sha});
+# surfaced at GET /api/version and in the Settings footer. Defaults to "dev".
+ARG GIT_SHA=dev
+
 # Default data locations inside the container. `RUSTNOTE_NOTES_REPO_PATH`
 # should be bind-mounted to the real vault; `RUSTNOTE_SQLITE_PATH`'s parent
 # dir should be a persistent volume so sessions/ACL/shares survive restarts.
 ENV RUSTNOTE_NOTES_REPO_PATH=/data/notes \
     RUSTNOTE_SQLITE_PATH=/data/db/rust_note.db \
     RUSTNOTE_STATIC_DIR=/app/static \
-    RUSTNOTE_BIND_ADDR=0.0.0.0:8080
+    RUSTNOTE_BIND_ADDR=0.0.0.0:8080 \
+    RUSTNOTE_BUILD_SHA=${GIT_SHA}
 
 RUN mkdir -p /data/notes /data/db && chown -R rustnote:rustnote /data /app
 USER rustnote

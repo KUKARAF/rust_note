@@ -25,7 +25,7 @@
 		type NotifyPriority,
 		type NotifyTestResult
 	} from '$lib/stores/settings';
-	import { apiPost } from '$lib/api/client';
+	import { apiGet, apiPost } from '$lib/api/client';
 	import { IS_APP } from '$lib/api/deviceToken';
 	import {
 		getMirrorState,
@@ -395,8 +395,17 @@
 	let mirrorProgress = $state<string | null>(null);
 	let mirrorError = $state<string | null>(null);
 
+	// Running build sha, baked into the image by CI; shown in the footer so it's
+	// unambiguous which version is live. "dev" for local runs.
+	let buildSha = $state<string | null>(null);
+
 	onMount(() => {
 		if (IS_APP) void refreshMirrorState();
+		void apiGet<{ sha: string; short_sha: string }>('/api/version')
+			.then((v) => {
+				buildSha = v.short_sha;
+			})
+			.catch(() => {});
 	});
 
 	async function refreshMirrorState() {
@@ -697,6 +706,8 @@
 			{#if mirrorError}<p class="settings-error">{mirrorError}</p>{/if}
 		</section>
 	{/if}
+
+	<p class="build-footer">running {buildSha ?? '…'}</p>
 </div>
 
 <style>
@@ -808,5 +819,13 @@
 		font-size: var(--type-meta);
 		color: var(--kv-dim);
 		margin: var(--space-4) 0 0 0;
+	}
+
+	.build-footer {
+		font-family: var(--font-term);
+		font-size: var(--type-meta);
+		color: var(--kv-dim);
+		margin: var(--space-8) 0 0 0;
+		opacity: 0.6;
 	}
 </style>

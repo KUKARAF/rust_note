@@ -50,6 +50,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           tags: |
             ghcr.io/kukaraf/rust_note:latest
             ghcr.io/kukaraf/rust_note:${{ github.sha }}
