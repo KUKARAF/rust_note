@@ -19,6 +19,27 @@ pub struct UserSettings {
     /// OpenRouter API key. Stored here (server-side) and never returned by the
     /// settings GET — see `SettingsResponse`.
     pub openrouter_api_key: String,
+
+    // ---- priority-notify digest (see `docs/notifications.md`) ----
+    /// Whether the overdue-pipeline digest is pushed to priority-notify.
+    pub notify_enabled: bool,
+    /// Base URL of the priority-notify server; `/api/notifications/` is
+    /// appended when POSTing.
+    pub notify_endpoint: String,
+    /// priority-notify API token. A **write-only secret** (like
+    /// `openrouter_api_key`): stored server-side, never returned by the
+    /// settings GET and never logged.
+    pub notify_token: String,
+    /// Notification priority: one of low/medium/high/critical.
+    pub notify_priority: String,
+    /// Which overdue items to include: one of ours/theirs/both.
+    pub notify_scope: String,
+    /// RRULE (iCal) governing when the digest fires, evaluated in
+    /// [`crate::stats::DEFAULT_TZ`].
+    pub notify_schedule: String,
+    /// Internal bookkeeping: RFC3339 timestamp of the last fire, stamped by
+    /// the scheduler. Not user-editable and never returned to the client.
+    pub notify_last_sent: String,
 }
 
 impl Default for UserSettings {
@@ -27,11 +48,42 @@ impl Default for UserSettings {
             theme: "ration".to_string(),
             openrouter_model: DEFAULT_OPENROUTER_MODEL.to_string(),
             openrouter_api_key: String::new(),
+            notify_enabled: false,
+            notify_endpoint: DEFAULT_NOTIFY_ENDPOINT.to_string(),
+            notify_token: String::new(),
+            notify_priority: DEFAULT_NOTIFY_PRIORITY.to_string(),
+            notify_scope: DEFAULT_NOTIFY_SCOPE.to_string(),
+            notify_schedule: DEFAULT_NOTIFY_SCHEDULE.to_string(),
+            notify_last_sent: String::new(),
         }
     }
 }
 
 pub const KNOWN_THEMES: &[&str] = &["ration"];
+
+/// Default priority-notify base URL.
+pub const DEFAULT_NOTIFY_ENDPOINT: &str = "https://notifications.osmosis.page";
+/// Default notification priority.
+pub const DEFAULT_NOTIFY_PRIORITY: &str = "high";
+/// Default overdue scope.
+pub const DEFAULT_NOTIFY_SCOPE: &str = "both";
+/// Default fire schedule: daily at 08:00 (Europe/Warsaw).
+pub const DEFAULT_NOTIFY_SCHEDULE: &str = "FREQ=DAILY;BYHOUR=8;BYMINUTE=0";
+
+/// Accepted `notify_priority` values (priority-notify's levels).
+pub const NOTIFY_PRIORITIES: &[&str] = &["low", "medium", "high", "critical"];
+/// Accepted `notify_scope` values.
+pub const NOTIFY_SCOPES: &[&str] = &["ours", "theirs", "both"];
+
+/// Whether `s` is a valid `notify_priority`.
+pub fn is_valid_notify_priority(s: &str) -> bool {
+    NOTIFY_PRIORITIES.contains(&s)
+}
+
+/// Whether `s` is a valid `notify_scope`.
+pub fn is_valid_notify_scope(s: &str) -> bool {
+    NOTIFY_SCOPES.contains(&s)
+}
 
 /// Default OpenRouter model for new settings. The settings UI offers a few
 /// suggestions; [`is_valid_model_id`] (not an allowlist) governs what's
@@ -91,11 +143,99 @@ pub fn parse_settings_tolerant(content: &str) -> UserSettings {
         .unwrap_or(DEFAULT_OPENROUTER_MODEL)
         .to_string();
     let openrouter_api_key = fm.get("openrouter_api_key").unwrap_or("").to_string();
+
+    // "true"/"false" tolerant: any value other than the literal `true` is off.
+    let notify_enabled = fm.get("notify_enabled") == Some("true");
+    let notify_endpoint = fm
+        .get("notify_endpoint")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_NOTIFY_ENDPOINT)
+        .to_string();
+    let notify_token = fm.get("notify_token").unwrap_or("").to_string();
+    let notify_priority = fm
+        .get("notify_priority")
+        .map(str::trim)
+        .filter(|s| is_valid_notify_priority(s))
+        .unwrap_or(DEFAULT_NOTIFY_PRIORITY)
+        .to_string();
+    let notify_scope = fm
+        .get("notify_scope")
+        .map(str::trim)
+        .filter(|s| is_valid_notify_scope(s))
+        .unwrap_or(DEFAULT_NOTIFY_SCOPE)
+        .to_string();
+    let notify_schedule = fm
+        .get("notify_schedule")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_NOTIFY_SCHEDULE)
+        .to_string();
+    let notify_last_sent = fm.get("notify_last_sent").unwrap_or("").to_string();
+
     UserSettings {
         theme,
         openrouter_model,
         openrouter_api_key,
+        notify_enabled,
+        notify_endpoint,
+        notify_token,
+        notify_priority,
+        notify_scope,
+        notify_schedule,
+        notify_last_sent,
     }
+}
+
+/// Persist one or more frontmatter fields on `user_id`'s settings note,
+/// read-modify-writing exactly like `put_settings` (bootstrap → parse → `set`
+/// → write+commit → touch). Takes the settings-note lock internally.
+///
+/// Used by the notify scheduler to stamp `notify_last_sent` after a fire.
+pub async fn update_settings_fields(
+    state: &AppState,
+    user_id: &str,
+    fields: &[(&str, &str)],
+) -> AppResult<()> {
+    let note_id = settings_note_id(user_id);
+    let rel_path = note_id_to_path(&note_id);
+    let _guard = state.note_locks.lock(&note_id).await;
+
+    load_or_bootstrap(state, user_id).await?;
+
+    let raw = state
+        .notes_repo
+        .read_file(&rel_path)
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!("settings note vanished after bootstrap"))
+        })?;
+
+    let mut fm = Frontmatter::parse(&raw);
+    for (key, value) in fields {
+        fm.set(key, value);
+    }
+    let new_content = fm.render();
+
+    let (author_name, author_email) = commit_author(&state.db, user_id)
+        .await
+        .map_err(AppError::Internal)?;
+    state
+        .notes_repo
+        .write_and_commit(
+            &rel_path,
+            &new_content,
+            &author_name,
+            &author_email,
+            "update settings",
+        )
+        .await
+        .map_err(AppError::Internal)?;
+    acl::touch_updated_at(&state.db, &note_id)
+        .await
+        .map_err(AppError::Internal)?;
+
+    Ok(())
 }
 
 /// Load `user_id`'s settings note, creating it with defaults (registering
@@ -273,5 +413,59 @@ mod tests {
     fn parse_settings_tolerant_falls_back_on_unknown_theme() {
         let settings = parse_settings_tolerant("---\ntheme: bogus-theme\n---\nbody\n");
         assert_eq!(settings.theme, "ration");
+    }
+
+    #[test]
+    fn notify_fields_default_when_absent() {
+        let s = parse_settings_tolerant("---\ntheme: ration\n---\n");
+        assert!(!s.notify_enabled);
+        assert_eq!(s.notify_endpoint, DEFAULT_NOTIFY_ENDPOINT);
+        assert_eq!(s.notify_priority, "high");
+        assert_eq!(s.notify_scope, "both");
+        assert_eq!(s.notify_schedule, DEFAULT_NOTIFY_SCHEDULE);
+        assert!(s.notify_token.is_empty());
+        assert!(s.notify_last_sent.is_empty());
+    }
+
+    #[test]
+    fn notify_fields_round_trip_through_frontmatter() {
+        let content = "---\n\
+            theme: ration\n\
+            notify_enabled: true\n\
+            notify_endpoint: https://push.example.com\n\
+            notify_token: ntfy-secret-xyz\n\
+            notify_priority: critical\n\
+            notify_scope: ours\n\
+            notify_schedule: FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0\n\
+            notify_last_sent: 2026-10-01T06:00:00Z\n\
+            ---\nbody\n";
+        let s = parse_settings_tolerant(content);
+        assert!(s.notify_enabled);
+        assert_eq!(s.notify_endpoint, "https://push.example.com");
+        assert_eq!(s.notify_token, "ntfy-secret-xyz");
+        assert_eq!(s.notify_priority, "critical");
+        assert_eq!(s.notify_scope, "ours");
+        assert_eq!(
+            s.notify_schedule,
+            "FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0"
+        );
+        assert_eq!(s.notify_last_sent, "2026-10-01T06:00:00Z");
+    }
+
+    #[test]
+    fn notify_invalid_enum_values_fall_back_to_defaults() {
+        let s = parse_settings_tolerant(
+            "---\ntheme: ration\nnotify_priority: urgent\nnotify_scope: everything\n---\n",
+        );
+        assert_eq!(s.notify_priority, "high");
+        assert_eq!(s.notify_scope, "both");
+    }
+
+    #[test]
+    fn notify_enabled_is_off_for_non_true_values() {
+        for v in ["false", "yes", "1", "TRUE", ""] {
+            let s = parse_settings_tolerant(&format!("---\nnotify_enabled: {v}\n---\n"));
+            assert!(!s.notify_enabled, "{v:?} must not enable notify");
+        }
     }
 }

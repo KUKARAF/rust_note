@@ -28,9 +28,9 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Serialize)]
 pub(crate) struct PipelineEntry {
     #[serde(flatten)]
-    item: PipelineItem,
+    pub(crate) item: PipelineItem,
     /// The ball is in play (`!= none`), a deadline exists, and it has passed.
-    overdue: bool,
+    pub(crate) overdue: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,6 +59,22 @@ pub(crate) async fn list_pipeline(
             _ => None,
         };
 
+    let entries = collect_pipeline(&state, &user_id, kind_filter, query.include_closed).await?;
+    Ok(Json(entries))
+}
+
+/// Walk every `pipeline/` note readable by `user_id`, parse it, and return the
+/// matching [`PipelineEntry`]s with their request-time `overdue` flag computed.
+///
+/// Shared by the `GET /api/pipeline` route and the notify scheduler (which
+/// calls it directly, without a self-HTTP round-trip). `kind` filters to one
+/// tracker when `Some`; `include_closed` surfaces terminal/`ball == none` items.
+pub(crate) async fn collect_pipeline(
+    state: &AppState,
+    user_id: &str,
+    kind: Option<Kind>,
+    include_closed: bool,
+) -> AppResult<Vec<PipelineEntry>> {
     let paths = state.notes_repo.list_notes().map_err(AppError::Internal)?;
     let now = OffsetDateTime::now_utc();
 
@@ -71,10 +87,10 @@ pub(crate) async fn list_pipeline(
 
         // Same lazy-adopt + ACL gate as the todos/notes list, so externally
         // created pipeline notes are included and other users' notes filtered.
-        acl::adopt_if_orphaned(&state.db, &note_id, &user_id)
+        acl::adopt_if_orphaned(&state.db, &note_id, user_id)
             .await
             .map_err(AppError::Internal)?;
-        if !acl::can_read(&state.db, &note_id, &user_id)
+        if !acl::can_read(&state.db, &note_id, user_id)
             .await
             .map_err(AppError::Internal)?
         {
@@ -98,10 +114,10 @@ pub(crate) async fn list_pipeline(
             continue;
         };
 
-        if kind_filter.is_some_and(|k| k != item.kind) {
+        if kind.is_some_and(|k| k != item.kind) {
             continue;
         }
-        if !query.include_closed && item.is_closed() {
+        if !include_closed && item.is_closed() {
             continue;
         }
 
@@ -109,7 +125,7 @@ pub(crate) async fn list_pipeline(
         entries.push(PipelineEntry { item, overdue });
     }
 
-    Ok(Json(entries))
+    Ok(entries)
 }
 
 #[cfg(test)]

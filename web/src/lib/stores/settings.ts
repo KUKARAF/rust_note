@@ -4,12 +4,30 @@ import { apiGet, apiPut, ApiError } from '$lib/api/client';
 // Widen this union (and `THEMES` in the settings page) when a 2nd theme ships.
 export type Theme = 'ration';
 
+/** `notify_scope` — which side of the pipeline ball counts as overdue for the digest. */
+export type NotifyScope = 'ours' | 'theirs' | 'both';
+
+/** `notify_priority` — priority-notify's own priority levels. */
+export type NotifyPriority = 'low' | 'medium' | 'high' | 'critical';
+
 export interface SettingsState {
 	theme: Theme;
 	/** OpenRouter model id used for natural-language todo queries. */
 	openrouterModel: string;
 	/** Whether an OpenRouter API key is stored server-side (never the key itself). */
 	hasOpenrouterKey: boolean;
+	/** Whether the priority-notify daily digest is enabled. */
+	notifyEnabled: boolean;
+	/** Base URL of the priority-notify server (path is appended server-side). */
+	notifyEndpoint: string;
+	/** Priority level attached to each digest push. */
+	notifyPriority: NotifyPriority;
+	/** Which overdue pipeline items count towards the digest. */
+	notifyScope: NotifyScope;
+	/** RRULE string controlling when the digest fires. */
+	notifySchedule: string;
+	/** Whether a priority-notify API token is stored server-side (never the token itself). */
+	hasNotifyToken: boolean;
 	loading: boolean;
 }
 
@@ -18,10 +36,18 @@ interface SettingsResponse {
 	theme: Theme;
 	openrouter_model: string;
 	has_openrouter_key: boolean;
+	notify_enabled: boolean;
+	notify_endpoint: string;
+	notify_priority: NotifyPriority;
+	notify_scope: NotifyScope;
+	notify_schedule: string;
+	has_notify_token: boolean;
 }
 
 const STORAGE_KEY = 'rust-note-theme';
 const DEFAULT_MODEL = 'minimax/minimax-m3';
+export const DEFAULT_NOTIFY_ENDPOINT = 'https://notifications.osmosis.page';
+export const DEFAULT_NOTIFY_SCHEDULE = 'FREQ=DAILY;BYHOUR=8;BYMINUTE=0';
 
 function readCachedTheme(): Theme {
 	try {
@@ -49,6 +75,12 @@ export const settings = writable<SettingsState>({
 	theme: readCachedTheme(),
 	openrouterModel: DEFAULT_MODEL,
 	hasOpenrouterKey: false,
+	notifyEnabled: false,
+	notifyEndpoint: DEFAULT_NOTIFY_ENDPOINT,
+	notifyPriority: 'high',
+	notifyScope: 'both',
+	notifySchedule: DEFAULT_NOTIFY_SCHEDULE,
+	hasNotifyToken: false,
 	loading: true
 });
 
@@ -69,6 +101,12 @@ export async function loadSettings(): Promise<void> {
 			theme: result.theme,
 			openrouterModel: result.openrouter_model || DEFAULT_MODEL,
 			hasOpenrouterKey: result.has_openrouter_key,
+			notifyEnabled: result.notify_enabled,
+			notifyEndpoint: result.notify_endpoint || DEFAULT_NOTIFY_ENDPOINT,
+			notifyPriority: result.notify_priority || 'high',
+			notifyScope: result.notify_scope || 'both',
+			notifySchedule: result.notify_schedule || DEFAULT_NOTIFY_SCHEDULE,
+			hasNotifyToken: result.has_notify_token,
 			loading: false
 		});
 	} catch (err) {
@@ -98,4 +136,45 @@ export async function setOpenrouterModel(model: string): Promise<void> {
 export async function setOpenrouterKey(key: string): Promise<void> {
 	const result = await apiPut<SettingsResponse>('/api/settings', { openrouter_api_key: key });
 	settings.update((s) => ({ ...s, hasOpenrouterKey: result.has_openrouter_key }));
+}
+
+// --- priority-notify digest ------------------------------------------------
+
+export async function setNotifyEnabled(enabled: boolean): Promise<void> {
+	const result = await apiPut<SettingsResponse>('/api/settings', { notify_enabled: enabled });
+	settings.update((s) => ({ ...s, notifyEnabled: result.notify_enabled }));
+}
+
+export async function setNotifyScope(scope: NotifyScope): Promise<void> {
+	const result = await apiPut<SettingsResponse>('/api/settings', { notify_scope: scope });
+	settings.update((s) => ({ ...s, notifyScope: result.notify_scope }));
+}
+
+export async function setNotifyPriority(priority: NotifyPriority): Promise<void> {
+	const result = await apiPut<SettingsResponse>('/api/settings', { notify_priority: priority });
+	settings.update((s) => ({ ...s, notifyPriority: result.notify_priority }));
+}
+
+export async function setNotifySchedule(rrule: string): Promise<void> {
+	const result = await apiPut<SettingsResponse>('/api/settings', { notify_schedule: rrule });
+	settings.update((s) => ({ ...s, notifySchedule: result.notify_schedule }));
+}
+
+export async function setNotifyEndpoint(endpoint: string): Promise<void> {
+	const result = await apiPut<SettingsResponse>('/api/settings', { notify_endpoint: endpoint });
+	settings.update((s) => ({ ...s, notifyEndpoint: result.notify_endpoint }));
+}
+
+/** Save (or, with an empty string, clear) the priority-notify API token. */
+export async function setNotifyToken(token: string): Promise<void> {
+	const result = await apiPut<SettingsResponse>('/api/settings', { notify_token: token });
+	settings.update((s) => ({ ...s, hasNotifyToken: result.has_notify_token }));
+}
+
+/** Result shape returned by `POST /api/settings/notify-test`. */
+export interface NotifyTestResult {
+	sent: boolean;
+	count: number;
+	title: string;
+	message: string;
 }

@@ -10,8 +10,19 @@
 		setTheme,
 		setOpenrouterModel,
 		setOpenrouterKey,
-		type Theme
+		setNotifyEnabled,
+		setNotifyScope,
+		setNotifyPriority,
+		setNotifySchedule,
+		setNotifyEndpoint,
+		setNotifyToken,
+		DEFAULT_NOTIFY_ENDPOINT,
+		type Theme,
+		type NotifyScope,
+		type NotifyPriority,
+		type NotifyTestResult
 	} from '$lib/stores/settings';
+	import { apiPost } from '$lib/api/client';
 	import { IS_APP } from '$lib/api/deviceToken';
 	import {
 		getMirrorState,
@@ -103,6 +114,204 @@
 			console.error(err);
 		} finally {
 			aiSaving = false;
+		}
+	}
+
+	// --- Notifications / priority-notify digest -------------------------------
+
+	const SCOPE_OPTIONS: { id: NotifyScope; label: string }[] = [
+		{ id: 'ours', label: 'OURS' },
+		{ id: 'theirs', label: 'THEIRS' },
+		{ id: 'both', label: 'BOTH' }
+	];
+
+	const PRIORITY_OPTIONS: { id: NotifyPriority; label: string }[] = [
+		{ id: 'low', label: 'LOW' },
+		{ id: 'medium', label: 'MEDIUM' },
+		{ id: 'high', label: 'HIGH' },
+		{ id: 'critical', label: 'CRITICAL' }
+	];
+
+	const SCHEDULE_PRESETS: { label: string; rrule: string }[] = [
+		{ label: 'Daily at 08:00', rrule: 'FREQ=DAILY;BYHOUR=8;BYMINUTE=0' },
+		{ label: 'Daily at 18:00', rrule: 'FREQ=DAILY;BYHOUR=18;BYMINUTE=0' },
+		{
+			label: 'Weekday mornings',
+			rrule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=8;BYMINUTE=0'
+		}
+	];
+	const CUSTOM_PRESET = 'custom';
+
+	let notifySaving = $state(false);
+	let notifyError = $state<string | null>(null);
+
+	// Which preset the schedule picker shows as active; recomputed whenever the
+	// loaded/saved RRULE changes so a value that matches no preset falls back to
+	// "Custom…" and reveals the raw-RRULE input.
+	let schedulePreset = $derived(
+		SCHEDULE_PRESETS.find((p) => p.rrule === $settings.notifySchedule)?.rrule ?? CUSTOM_PRESET
+	);
+	let customScheduleInput = $state('');
+
+	async function toggleNotifyEnabled() {
+		if (notifySaving) return;
+		notifySaving = true;
+		notifyError = null;
+		try {
+			await setNotifyEnabled(!$settings.notifyEnabled);
+		} catch (err) {
+			notifyError = 'Could not save.';
+			console.error(err);
+		} finally {
+			notifySaving = false;
+		}
+	}
+
+	async function chooseScope(scope: NotifyScope) {
+		if (notifySaving || scope === $settings.notifyScope) return;
+		notifySaving = true;
+		notifyError = null;
+		try {
+			await setNotifyScope(scope);
+		} catch (err) {
+			notifyError = 'Could not save the scope.';
+			console.error(err);
+		} finally {
+			notifySaving = false;
+		}
+	}
+
+	async function choosePriority(priority: NotifyPriority) {
+		if (notifySaving || priority === $settings.notifyPriority) return;
+		notifySaving = true;
+		notifyError = null;
+		try {
+			await setNotifyPriority(priority);
+		} catch (err) {
+			notifyError = 'Could not save the priority.';
+			console.error(err);
+		} finally {
+			notifySaving = false;
+		}
+	}
+
+	async function choosePreset(rrule: string) {
+		if (notifySaving || rrule === schedulePreset) return;
+		if (rrule === CUSTOM_PRESET) {
+			// Reveal the raw-RRULE input seeded with the current value; nothing is
+			// saved until the user edits and applies it.
+			customScheduleInput = $settings.notifySchedule;
+			return;
+		}
+		notifySaving = true;
+		notifyError = null;
+		try {
+			await setNotifySchedule(rrule);
+		} catch (err) {
+			notifyError = 'Could not save the schedule.';
+			console.error(err);
+		} finally {
+			notifySaving = false;
+		}
+	}
+
+	async function applyCustomSchedule() {
+		if (notifySaving || customScheduleInput.trim() === '') return;
+		notifySaving = true;
+		notifyError = null;
+		try {
+			await setNotifySchedule(customScheduleInput.trim());
+		} catch (err) {
+			notifyError = 'Could not save the schedule.';
+			console.error(err);
+		} finally {
+			notifySaving = false;
+		}
+	}
+
+	let endpointInput = $state($settings.notifyEndpoint);
+
+	// The store starts out with a default endpoint and is updated once
+	// `GET /api/settings` resolves (see root `+layout.svelte`); seed the field
+	// from the real value as soon as it arrives, but only the first time so a
+	// later save elsewhere doesn't clobber an in-progress edit.
+	let endpointSeeded = false;
+	$effect(() => {
+		if (!endpointSeeded && !$settings.loading) {
+			endpointInput = $settings.notifyEndpoint;
+			endpointSeeded = true;
+		}
+	});
+
+	async function saveEndpoint() {
+		if (notifySaving || endpointInput.trim() === '') return;
+		notifySaving = true;
+		notifyError = null;
+		try {
+			await setNotifyEndpoint(endpointInput.trim());
+		} catch (err) {
+			notifyError = 'Could not save the endpoint.';
+			console.error(err);
+		} finally {
+			notifySaving = false;
+		}
+	}
+
+	let notifyTokenInput = $state('');
+	let notifySaved = $state<string | null>(null);
+
+	async function saveNotifyToken() {
+		if (notifySaving || notifyTokenInput.trim() === '') return;
+		notifySaving = true;
+		notifyError = null;
+		notifySaved = null;
+		try {
+			await setNotifyToken(notifyTokenInput.trim());
+			notifyTokenInput = '';
+			notifySaved = 'API key saved.';
+		} catch (err) {
+			notifyError = 'Could not save the API key.';
+			console.error(err);
+		} finally {
+			notifySaving = false;
+		}
+	}
+
+	async function clearNotifyToken() {
+		if (notifySaving) return;
+		notifySaving = true;
+		notifyError = null;
+		notifySaved = null;
+		try {
+			await setNotifyToken('');
+			notifyTokenInput = '';
+			notifySaved = 'API key cleared.';
+		} catch (err) {
+			notifyError = 'Could not clear the API key.';
+			console.error(err);
+		} finally {
+			notifySaving = false;
+		}
+	}
+
+	let notifyTestBusy = $state(false);
+	let notifyTestResult = $state<string | null>(null);
+
+	async function sendTestNotification() {
+		if (notifyTestBusy || !$settings.hasNotifyToken) return;
+		notifyTestBusy = true;
+		notifyTestResult = null;
+		notifyError = null;
+		try {
+			const result = await apiPost<NotifyTestResult>('/api/settings/notify-test');
+			notifyTestResult = result.sent
+				? `Sent: ${result.count} item${result.count === 1 ? '' : 's'}`
+				: result.title;
+		} catch (err) {
+			notifyTestResult = err instanceof Error ? err.message : 'Could not send the test.';
+			console.error(err);
+		} finally {
+			notifyTestBusy = false;
 		}
 	}
 
@@ -231,6 +440,145 @@
 
 		{#if aiSaved}<p class="ai-saved">{aiSaved}</p>{/if}
 		{#if aiError}<p class="settings-error">{aiError}</p>{/if}
+	</section>
+
+	<section class="settings-section">
+		<h2 class="settings-section-title">Notifications · priority-notify</h2>
+		<p class="ai-help">Pushes a daily digest of overdue Pipeline items to your devices.</p>
+
+		<div class="ai-field">
+			<span class="ai-label">Enabled</span>
+			<button
+				class="theme-option"
+				onclick={toggleNotifyEnabled}
+				disabled={notifySaving}
+				aria-pressed={$settings.notifyEnabled}
+			>
+				<Chip color="accent" variant={$settings.notifyEnabled ? 'tint' : 'outline'}>
+					{$settings.notifyEnabled ? 'ON ✓' : 'OFF'}
+				</Chip>
+			</button>
+		</div>
+
+		<div class="ai-field">
+			<span class="ai-label">Scope</span>
+			<div class="model-options">
+				{#each SCOPE_OPTIONS as opt (opt.id)}
+					<button
+						class="theme-option"
+						onclick={() => chooseScope(opt.id)}
+						disabled={notifySaving}
+						aria-pressed={$settings.notifyScope === opt.id}
+					>
+						<Chip color="accent" variant={$settings.notifyScope === opt.id ? 'tint' : 'outline'}>
+							{opt.label}{$settings.notifyScope === opt.id ? ' ✓' : ''}
+						</Chip>
+					</button>
+				{/each}
+			</div>
+		</div>
+
+		<div class="ai-field">
+			<span class="ai-label">Priority</span>
+			<div class="model-options">
+				{#each PRIORITY_OPTIONS as opt (opt.id)}
+					<button
+						class="theme-option"
+						onclick={() => choosePriority(opt.id)}
+						disabled={notifySaving}
+						aria-pressed={$settings.notifyPriority === opt.id}
+					>
+						<Chip color="accent" variant={$settings.notifyPriority === opt.id ? 'tint' : 'outline'}>
+							{opt.label}{$settings.notifyPriority === opt.id ? ' ✓' : ''}
+						</Chip>
+					</button>
+				{/each}
+			</div>
+		</div>
+
+		<div class="ai-field">
+			<span class="ai-label">Schedule</span>
+			<div class="model-options">
+				{#each SCHEDULE_PRESETS as preset (preset.rrule)}
+					<button
+						class="theme-option"
+						onclick={() => choosePreset(preset.rrule)}
+						disabled={notifySaving}
+						aria-pressed={schedulePreset === preset.rrule}
+					>
+						<Chip color="accent" variant={schedulePreset === preset.rrule ? 'tint' : 'outline'}>
+							{preset.label}{schedulePreset === preset.rrule ? ' ✓' : ''}
+						</Chip>
+					</button>
+				{/each}
+				<button
+					class="theme-option"
+					onclick={() => choosePreset(CUSTOM_PRESET)}
+					disabled={notifySaving}
+					aria-pressed={schedulePreset === CUSTOM_PRESET}
+				>
+					<Chip color="accent" variant={schedulePreset === CUSTOM_PRESET ? 'tint' : 'outline'}>
+						Custom…{schedulePreset === CUSTOM_PRESET ? ' ✓' : ''}
+					</Chip>
+				</button>
+			</div>
+			{#if schedulePreset === CUSTOM_PRESET}
+				<div class="ai-key-row">
+					<Input placeholder="FREQ=DAILY;BYHOUR=8;BYMINUTE=0" bind:value={customScheduleInput} />
+					<Button variant="primary" size="sm" onclick={applyCustomSchedule} disabled={notifySaving}>
+						Apply
+					</Button>
+				</div>
+			{/if}
+			<p class="ai-current">Active: {$settings.notifySchedule}</p>
+		</div>
+
+		<div class="ai-field">
+			<span class="ai-label">Endpoint</span>
+			<div class="ai-key-row">
+				<Input placeholder={DEFAULT_NOTIFY_ENDPOINT} bind:value={endpointInput} />
+				<Button variant="primary" size="sm" onclick={saveEndpoint} disabled={notifySaving}>
+					Save
+				</Button>
+			</div>
+		</div>
+
+		<div class="ai-field">
+			<span class="ai-label">API key</span>
+			<p class="ai-current">
+				{$settings.hasNotifyToken ? 'A key is set ✓' : 'No key set'}
+			</p>
+			<div class="ai-key-row">
+				<Input
+					type="password"
+					placeholder={$settings.hasNotifyToken ? 'Replace key…' : 'Priority-notify token…'}
+					bind:value={notifyTokenInput}
+				/>
+				<Button variant="primary" size="sm" onclick={saveNotifyToken} disabled={notifySaving}>
+					Save key
+				</Button>
+				{#if $settings.hasNotifyToken}
+					<Button variant="outline" size="sm" onclick={clearNotifyToken} disabled={notifySaving}>
+						Clear
+					</Button>
+				{/if}
+			</div>
+		</div>
+
+		<div class="ai-field">
+			<Button
+				variant="outline"
+				size="sm"
+				onclick={sendTestNotification}
+				disabled={notifyTestBusy || !$settings.hasNotifyToken}
+			>
+				Send test
+			</Button>
+			{#if notifyTestResult}<p class="ai-current">{notifyTestResult}</p>{/if}
+		</div>
+
+		{#if notifySaved}<p class="ai-saved">{notifySaved}</p>{/if}
+		{#if notifyError}<p class="settings-error">{notifyError}</p>{/if}
 	</section>
 
 	{#if IS_APP}
