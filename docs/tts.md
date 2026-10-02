@@ -116,3 +116,71 @@ builds don't contend in the shared tree. Then:
   `CodeMirrorEditor.svelte`; the filename speaker button + modal wiring in the notes page.
 Backend (cargo) + frontend (npm) use different toolchains → safe to run concurrently in the
 same tree.
+
+## Chunked, progressively-buffered playback (current design)
+
+The original v1 shipped a single "synthesize the whole note in one request" call. That meant
+no audio played until the ENTIRE note finished rendering server-side, a slow/failed upstream
+call killed playback of the whole note, and the REST layer's (now-removed) 30s `TimeoutLayer`
+could 408 a long note outright. `/api/tts` is now called once PER CHUNK of a small, pre-split
+text, and the frontend buffers a few chunks ahead of what's currently playing.
+
+### Frontend chunking — `web/src/lib/notes/ttsChunk.ts`
+
+Pure, dependency-free, unit-tested module (`ttsChunk.test.ts`, run via
+`node --experimental-strip-types src/lib/notes/ttsChunk.test.ts` / `npm run test:unit` — there
+is no vitest/jest in this project, so this is a plain script with hand-rolled assertions rather
+than a new devDependency for one pure-function module).
+
+`chunkText(text, opts?) -> { chunks: string[], truncated: boolean, totalWords: number }`:
+1. Split on blank-line paragraph boundaries.
+2. Normalize whitespace and strip a few trivial markdown markers that sound jarring read
+   verbatim (`#` headers, `- `/`* ` bullets, `> ` quotes, `**bold**`/`_italic_`/`` `code` ``
+   wrappers) — not a full markdown parser, intentionally shallow.
+3. Within an over-long paragraph, split on sentence boundaries (`.`/`!`/`?` + whitespace),
+   greedily packing sentences up to `MAX_WORDS_PER_CHUNK` (default **50**) words per chunk.
+   A single sentence that alone exceeds the cap is hard-split on word boundaries.
+4. Enforce `MAX_TOTAL_WORDS` (default **4000**) as a safety net across the whole input: once
+   adding the next chunk would exceed the budget, chunking stops and `truncated: true` is
+   returned (not an error) so the caller can synthesize the prefix and tell the user the rest
+   was skipped.
+
+Defaults rationale: ~50 words/chunk synthesizes in roughly 1-3s on a typical TTS model, which
+comfortably fits inside the frontend's 2-3 chunk prefetch window at normal speech rate
+(~130-160 wpm) while staying large enough to avoid excessive per-chunk HTTP overhead or choppy
+audio. 4000 words is well over half an hour of speech — generous for a note, but still a hard
+backstop against pathological input (e.g. an entire vault pasted in as "the note").
+
+### Frontend playback — `web/src/lib/notes/TtsDialog.svelte`
+
+- `chunks[]` from `chunkText`, each with a `ChunkSlot { status: idle|loading|ready|error|done,
+  url, error }`.
+- `ensurePrefetch()` kicks off a `rawFetch('/api/tts', { body: { text: chunk, model } })` for
+  every idle slot in `[currentIndex, currentIndex + PREFETCH_AHEAD]` (`PREFETCH_AHEAD = 2`,
+  i.e. up to 3 chunks buffered: current + 2 ahead). Each fetch checks `res.ok` and a
+  `content-type` starting with `audio/` before `res.blob()`, then `URL.createObjectURL`s it.
+- Playback starts as soon as chunk 0's blob is ready (doesn't wait for the rest) through ONE
+  `<audio>` element. On `ended`: revoke the finished chunk's object URL, advance
+  `currentIndex`, and either start the next chunk (if its slot is already `ready`) or wait —
+  a `$effect` watching `(playState, slots[currentIndex])` starts it the moment it becomes
+  ready. Small gaps at sentence boundaries are expected; no Web Audio gapless stitching.
+- **Controls:** Play/Pause/Resume toggle + Stop, plus a "chunk N / M" progress line. Stop
+  (and modal close/unmount, and entering the error state) call `abortAndRevokeAll()`: aborts
+  every in-flight fetch via its own `AbortController` and revokes every outstanding object
+  URL. A per-chunk fetch error surfaces which chunk failed and stops cleanly rather than
+  silently skipping it.
+- Tauri/WebView: the first `Play` click is the user gesture; subsequent chunk starts are
+  chained from the `ended` event of an already-playing element, which browsers (and the
+  Tauri WebView) allow. Still uses `rawFetch` so the bearer device token is attached in app
+  mode.
+
+### Backend tweak — `crates/server/src/tts/routes.rs`
+
+- `MAX_TTS_TEXT_BYTES` lowered from 8 KiB to **4 KiB**: chunks are now small (tens of words),
+  so a single request never carries a whole note; the cap mainly guards against a caller that
+  bypasses the chunker.
+- `TTS_TIMEOUT` raised from 90s to **120s**: `/api/tts` no longer sits behind the removed 30s
+  `TimeoutLayer`, and a single chunk can still be slow on a cold/loaded TTS backend.
+- Text-length validation was pulled into a standalone `validate_text_len` function so it's
+  unit-testable without standing up `AppState`; see `tts::routes::tests` for cap-boundary and
+  typical-chunk-size coverage.

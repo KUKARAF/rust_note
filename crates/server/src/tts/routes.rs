@@ -20,14 +20,17 @@ use crate::error::{AppError, AppResult};
 use crate::settings::store;
 use crate::state::AppState;
 
-/// Upper bound on the text accepted for synthesis. A whole-note synthesis can
-/// be slow, and the REST surface still inherits a 30s `TimeoutLayer`, so keep
-/// inputs modest: reject anything over ~8 KiB with a clear `BadRequest`.
-const MAX_TTS_TEXT_BYTES: usize = 8 * 1024;
+/// Upper bound on the text accepted for a single synthesis request. The
+/// frontend now splits notes into small chunks (a few sentences each, see
+/// `web/src/lib/notes/ttsChunk.ts`) before calling this endpoint, so a single
+/// request is never a whole note anymore — 4 KiB is generous headroom for one
+/// chunk while still catching a caller that bypasses the chunker.
+const MAX_TTS_TEXT_BYTES: usize = 4 * 1024;
 
 /// Dedicated TTS client timeout. Longer than the shared `recurring::http_client`
-/// (20s) because whole-note synthesis can legitimately run long.
-const TTS_TIMEOUT: Duration = Duration::from_secs(90);
+/// (20s): even a single small chunk can be slow on a cold/loaded TTS backend,
+/// and this route no longer sits behind the REST layer's `TimeoutLayer`.
+const TTS_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/tts", post(synthesize))
@@ -60,16 +63,7 @@ async fn synthesize(
     RequireAuth(user_id): RequireAuth,
     WithRejection(Json(body), _): WithRejection<Json<TtsRequest>, AppError>,
 ) -> AppResult<impl IntoResponse> {
-    if body.text.trim().is_empty() {
-        return Err(AppError::BadRequest("empty text".to_string()));
-    }
-    if body.text.len() > MAX_TTS_TEXT_BYTES {
-        return Err(AppError::BadRequest(format!(
-            "text is too long ({} bytes); the limit is {MAX_TTS_TEXT_BYTES} bytes — select less \
-             text or shorten the note",
-            body.text.len()
-        )));
-    }
+    validate_text_len(&body.text)?;
 
     let note_id = store::settings_note_id(&user_id);
     let settings = {
@@ -138,6 +132,22 @@ async fn synthesize(
         .map_err(|e| AppError::Internal(anyhow!("reading the TTS audio failed: {e}")))?;
 
     Ok(([(axum::http::header::CONTENT_TYPE, "audio/wav")], audio))
+}
+
+/// Reject empty input and input over [`MAX_TTS_TEXT_BYTES`]. Pulled out of the
+/// handler so it's unit-testable without standing up `AppState`.
+fn validate_text_len(text: &str) -> AppResult<()> {
+    if text.trim().is_empty() {
+        return Err(AppError::BadRequest("empty text".to_string()));
+    }
+    if text.len() > MAX_TTS_TEXT_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "text is too long ({} bytes); the limit is {MAX_TTS_TEXT_BYTES} bytes per request — \
+             the client should send smaller chunks",
+            text.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Confirm `model` is a text-to-speech model on the user's endpoint. Prefers the
@@ -235,6 +245,38 @@ mod tests {
             speech_url(""),
             format!("{}/audio/speech", store::DEFAULT_AI_ENDPOINT)
         );
+    }
+
+    #[test]
+    fn validate_text_len_rejects_empty_and_whitespace_only() {
+        assert!(matches!(
+            validate_text_len(""),
+            Err(AppError::BadRequest(_))
+        ));
+        assert!(matches!(
+            validate_text_len("   \n\t  "),
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn validate_text_len_accepts_up_to_the_cap_and_rejects_over() {
+        let at_cap = "a".repeat(MAX_TTS_TEXT_BYTES);
+        assert!(validate_text_len(&at_cap).is_ok());
+
+        let over_cap = "a".repeat(MAX_TTS_TEXT_BYTES + 1);
+        assert!(matches!(
+            validate_text_len(&over_cap),
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn validate_text_len_accepts_a_typical_chunk() {
+        // A single ~50-word chunk (see web/src/lib/notes/ttsChunk.ts) is nowhere
+        // near MAX_TTS_TEXT_BYTES — confirms the lowered cap still fits real chunks.
+        let chunk = "word ".repeat(50);
+        assert!(validate_text_len(&chunk).is_ok());
     }
 
     #[test]

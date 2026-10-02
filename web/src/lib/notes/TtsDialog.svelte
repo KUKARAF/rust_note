@@ -3,11 +3,24 @@
 	// (whole note) or the floating selection button in CodeMirrorEditor.svelte
 	// (selected text only). See docs/tts.md for the full contract.
 	//
-	// Backend: POST /api/tts { text, model, voice? } -> audio/wav bytes. The key
-	// lives server-side only, and the response is binary, so this uses a raw
-	// `rawFetch` (not the JSON `apiPost` helper) with the same auth attached.
+	// Backend: POST /api/tts { text, model, voice? } -> audio/wav bytes, ONE
+	// small chunk at a time (see ttsChunk.ts). The key lives server-side only,
+	// and the response is binary, so this uses a raw `rawFetch` (not the JSON
+	// `apiPost` helper) with the same auth attached.
+	//
+	// Playback is chunked and progressively buffered rather than one big
+	// synthesis request: the input text is split into small ordered chunks,
+	// each is synthesized with its own POST, and a rolling window of chunks
+	// ahead of the one currently playing is kept pre-fetched so the NEXT
+	// chunk's audio is ready before the current one finishes. Chunks play
+	// back-to-back through a single <audio> element; small gaps at sentence
+	// boundaries are expected and fine (no attempt at gapless/Web Audio
+	// stitching). This makes playback start fast (first chunk is small) and
+	// keeps one bad/slow chunk from blocking or failing the whole note.
+	import { onDestroy } from 'svelte';
 	import { rawFetch } from '$lib/api/client';
 	import { fetchAiModels } from '$lib/stores/settings';
+	import { chunkText, MAX_TOTAL_WORDS } from './ttsChunk';
 	import Card from '$lib/design/Card.svelte';
 	import Button from '$lib/design/Button.svelte';
 
@@ -26,16 +39,155 @@
 	let models = $state<string[]>([]);
 	let selectedModel = $state('');
 
-	let playState = $state<'idle' | 'loading' | 'playing' | 'error'>('idle');
+	// --- Chunked playback state -------------------------------------------
+
+	/** How many chunks beyond the currently-playing one to keep pre-fetched. */
+	const PREFETCH_AHEAD = 2;
+
+	type ChunkStatus = 'idle' | 'loading' | 'ready' | 'error' | 'done';
+
+	interface ChunkSlot {
+		status: ChunkStatus;
+		url: string | null;
+		error: string | null;
+	}
+
+	type PlayState = 'idle' | 'buffering' | 'playing' | 'paused' | 'done' | 'error';
+
+	let chunks = $state<string[]>([]);
+	let slots = $state<ChunkSlot[]>([]);
+	let currentIndex = $state(0);
+	let currentAudioUrl = $state<string | null>(null);
+	let playState = $state<PlayState>('idle');
 	let playError = $state<string | null>(null);
-	let audioUrl = $state<string | null>(null);
+	let truncatedNotice = $state<string | null>(null);
 	let audioEl: HTMLAudioElement | undefined = $state();
 
-	function revokeAudioUrl() {
-		if (audioUrl) {
-			URL.revokeObjectURL(audioUrl);
-			audioUrl = null;
+	// Plain (non-reactive) bookkeeping: one AbortController per in-flight fetch,
+	// keyed by chunk index, so Stop/close can abort everything outstanding.
+	// Intentionally a vanilla Map, not SvelteMap — nothing in the template reads
+	// this, so it doesn't need to participate in Svelte's reactivity.
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
+	const controllers = new Map<number, AbortController>();
+
+	/** Abort every in-flight fetch and revoke every outstanding object URL. */
+	function abortAndRevokeAll() {
+		for (const controller of controllers.values()) {
+			controller.abort();
 		}
+		controllers.clear();
+		for (const slot of slots) {
+			if (slot.url) {
+				URL.revokeObjectURL(slot.url);
+				slot.url = null;
+			}
+		}
+		currentAudioUrl = null;
+		audioEl?.pause();
+	}
+
+	async function fetchChunk(index: number) {
+		const slot = slots[index];
+		if (!slot || slot.status === 'loading' || slot.status === 'ready') return;
+		slot.status = 'loading';
+		slot.error = null;
+
+		const controller = new AbortController();
+		controllers.set(index, controller);
+		try {
+			const res = await rawFetch('/api/tts', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ text: chunks[index], model: selectedModel }),
+				signal: controller.signal
+			});
+			if (!res.ok) {
+				let message = `Request failed with status ${res.status}`;
+				try {
+					const body = await res.json();
+					if (body && typeof body === 'object' && 'message' in body) {
+						message = String((body as Record<string, unknown>).message);
+					}
+				} catch {
+					// non-JSON error body — keep the generic message
+				}
+				throw new Error(message);
+			}
+			const contentType = res.headers.get('content-type') ?? '';
+			if (!contentType.startsWith('audio/')) {
+				throw new Error(`Unexpected response type: ${contentType || 'unknown'}`);
+			}
+			const blob = await res.blob();
+			slot.url = URL.createObjectURL(blob);
+			slot.status = 'ready';
+			// A slot just freed up (conceptually) — keep the prefetch window full.
+			ensurePrefetch();
+		} catch (err) {
+			if (err instanceof DOMException && err.name === 'AbortError') {
+				// Stopped/closed mid-flight — not a user-facing error.
+				return;
+			}
+			slot.status = 'error';
+			slot.error = err instanceof Error ? err.message : 'Failed to synthesize audio.';
+		} finally {
+			controllers.delete(index);
+		}
+	}
+
+	/** Kick off fetches for every idle chunk in [currentIndex, currentIndex + PREFETCH_AHEAD]. */
+	function ensurePrefetch() {
+		const end = Math.min(currentIndex + PREFETCH_AHEAD, chunks.length - 1);
+		for (let i = currentIndex; i <= end; i++) {
+			const slot = slots[i];
+			if (slot && slot.status === 'idle') void fetchChunk(i);
+		}
+	}
+
+	function startCurrentChunk() {
+		const slot = slots[currentIndex];
+		if (!slot?.url) return;
+		currentAudioUrl = slot.url;
+		playState = 'playing';
+		// The click that triggered the first `play()` is the user gesture that
+		// makes autoplay-on-src-change allowed; subsequent chunks are chained
+		// from the `ended` event of a already-playing element, which is fine.
+		queueMicrotask(() => {
+			void audioEl?.play();
+		});
+	}
+
+	// Whenever we're waiting on the chunk at `currentIndex`, start it as soon
+	// as it's ready, or surface its error.
+	$effect(() => {
+		if (playState !== 'buffering') return;
+		const slot = slots[currentIndex];
+		if (!slot) return;
+		if (slot.status === 'ready') {
+			startCurrentChunk();
+		} else if (slot.status === 'error') {
+			playState = 'error';
+			playError = `Chunk ${currentIndex + 1} of ${chunks.length} failed: ${
+				slot.error ?? 'unknown error'
+			}`;
+			abortAndRevokeAll();
+		}
+	});
+
+	function handleEnded() {
+		const finished = slots[currentIndex];
+		if (finished?.url) {
+			URL.revokeObjectURL(finished.url);
+			finished.url = null;
+			finished.status = 'done';
+		}
+		currentAudioUrl = null;
+		currentIndex += 1;
+		if (currentIndex >= chunks.length) {
+			playState = 'done';
+			return;
+		}
+		playState = 'buffering';
+		ensurePrefetch();
 	}
 
 	async function loadModels() {
@@ -63,41 +215,52 @@
 		}
 	}
 
-	async function play() {
-		if (!selectedModel || playState === 'loading') return;
-		playState = 'loading';
-		playError = null;
-		revokeAudioUrl();
-		try {
-			const res = await rawFetch('/api/tts', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ text, model: selectedModel })
-			});
-			if (!res.ok) {
-				let message = `Request failed with status ${res.status}`;
-				try {
-					const body = await res.json();
-					if (body && typeof body === 'object' && 'message' in body) {
-						message = String((body as Record<string, unknown>).message);
-					}
-				} catch {
-					// non-JSON error body — keep the generic message
-				}
-				throw new Error(message);
-			}
-			const blob = await res.blob();
-			audioUrl = URL.createObjectURL(blob);
+	function play() {
+		if (!selectedModel) return;
+
+		if (playState === 'paused') {
 			playState = 'playing';
-			// Set after the <audio> element re-renders with the new src; the click
-			// that triggered `play()` is the user gesture that makes this allowed.
-			queueMicrotask(() => {
-				void audioEl?.play();
-			});
-		} catch (err) {
-			playState = 'error';
-			playError = err instanceof Error ? err.message : 'Failed to synthesize audio.';
+			void audioEl?.play();
+			return;
 		}
+		if (playState === 'playing' || playState === 'buffering') return;
+
+		// Fresh start: first Play, a Replay after completion, or a retry after
+		// an error. Re-chunk (text doesn't change while the dialog is open, but
+		// this keeps the fresh-start path self-contained) and reset everything.
+		abortAndRevokeAll();
+		const result = chunkText(text);
+		if (result.chunks.length === 0) {
+			playState = 'error';
+			playError = 'There is no text to read.';
+			return;
+		}
+		chunks = result.chunks;
+		slots = chunks.map(() => ({ status: 'idle', url: null, error: null }));
+		currentIndex = 0;
+		truncatedNotice = result.truncated
+			? `This note is long (${result.totalWords} words) — reading only the first ` +
+				`${chunks.length} chunk(s), up to the ${MAX_TOTAL_WORDS}-word safety limit.`
+			: null;
+
+		playState = 'buffering';
+		playError = null;
+		ensurePrefetch();
+	}
+
+	function pause() {
+		audioEl?.pause();
+		if (playState === 'playing') playState = 'paused';
+	}
+
+	function stop() {
+		abortAndRevokeAll();
+		chunks = [];
+		slots = [];
+		currentIndex = 0;
+		playState = 'idle';
+		playError = null;
+		truncatedNotice = null;
 	}
 
 	function onKeydown(event: KeyboardEvent) {
@@ -109,9 +272,13 @@
 	}
 
 	function close() {
-		revokeAudioUrl();
+		abortAndRevokeAll();
 		onclose();
 	}
+
+	onDestroy(() => {
+		abortAndRevokeAll();
+	});
 
 	loadModels();
 </script>
@@ -128,7 +295,7 @@
 				</div>
 
 				<p class="rt-caption">
-					{text.length} character{text.length === 1 ? '' : 's'} will be sent for synthesis.
+					{text.length} character{text.length === 1 ? '' : 's'} will be sent for synthesis, in small chunks.
 				</p>
 
 				{#if loadState === 'loading'}
@@ -141,29 +308,47 @@
 				{:else}
 					<label class="rt-field">
 						<span class="rt-field-label">Voice (model)</span>
-						<select class="rt-select" bind:value={selectedModel}>
+						<select class="rt-select" bind:value={selectedModel} disabled={playState !== 'idle'}>
 							{#each models as model (model)}
 								<option value={model}>{model}</option>
 							{/each}
 						</select>
 					</label>
 
+					{#if truncatedNotice}
+						<p class="rt-hint">{truncatedNotice}</p>
+					{/if}
+
 					{#if playError}
 						<p class="rt-error">{playError}</p>
 					{/if}
 
-					{#if audioUrl}
-						<audio class="rt-audio" bind:this={audioEl} src={audioUrl} controls></audio>
+					{#if chunks.length > 0}
+						<p class="rt-hint">
+							chunk {Math.min(currentIndex + 1, chunks.length)} / {chunks.length}
+							{#if playState === 'buffering'}(buffering…){/if}
+						</p>
 					{/if}
 
+					<audio class="rt-audio" bind:this={audioEl} src={currentAudioUrl} onended={handleEnded}
+					></audio>
+
 					<div class="rt-actions">
-						<Button
-							variant="primary"
-							size="sm"
-							disabled={!selectedModel || playState === 'loading'}
-							onclick={play}
-						>
-							{playState === 'loading' ? 'Synthesizing…' : 'Play'}
+						{#if playState === 'playing'}
+							<Button variant="primary" size="sm" onclick={pause}>Pause</Button>
+						{:else if playState === 'paused'}
+							<Button variant="primary" size="sm" onclick={play}>Resume</Button>
+						{:else if playState === 'buffering'}
+							<Button variant="primary" size="sm" disabled>Buffering…</Button>
+						{:else if playState === 'done'}
+							<Button variant="primary" size="sm" onclick={play}>Replay</Button>
+						{:else}
+							<Button variant="primary" size="sm" disabled={!selectedModel} onclick={play}>
+								Play
+							</Button>
+						{/if}
+						<Button variant="outline" size="sm" disabled={playState === 'idle'} onclick={stop}>
+							Stop
 						</Button>
 						<Button variant="outline" size="sm" onclick={close}>Close</Button>
 					</div>
@@ -272,8 +457,12 @@
 		border-color: var(--kv-accent);
 	}
 
+	.rt-select:disabled {
+		opacity: 0.6;
+	}
+
 	.rt-audio {
-		width: 100%;
+		display: none;
 	}
 
 	.rt-actions {
