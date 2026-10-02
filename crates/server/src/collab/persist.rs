@@ -179,6 +179,12 @@ pub async fn flush_room(room: &Arc<Room>, state: &AppState) -> anyhow::Result<()
     // a stale time for actively-collaborated notes.
     let _ = acl::touch_updated_at(&state.db, note_id).await;
 
+    // Pipeline stage-transition log: if this commit changed a pipeline note's
+    // `stage` (vs the pre-write on-disk `current`), append the transition to
+    // `stage_history` via a spawned, collab-safe write-back. Non-blocking and
+    // loop-safe (the write-back never changes `stage`); see that module.
+    crate::collab::stage_history::maybe_stamp(room, state, &current, &text);
+
     Ok(())
 }
 

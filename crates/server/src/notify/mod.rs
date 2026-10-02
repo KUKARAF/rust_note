@@ -405,6 +405,7 @@ mod tests {
                 last_activity_at: None,
                 next_interview_at: None,
                 closed_reason: None,
+                stage_history: Vec::new(),
             },
             overdue,
         }

@@ -69,6 +69,17 @@ impl Ball {
     }
 }
 
+/// One entry in a pipeline item's append-only `stage_history`: the stage the
+/// item moved *to* and the instant the server observed that move. Stored
+/// on-disk as `"<stage>@<rfc3339>"` inside the comma-list `stage_history` key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StageEntry {
+    pub stage: String,
+    /// Parsed RFC3339; serialized back as RFC3339.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+}
+
 /// A typed pipeline item parsed from a note's frontmatter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PipelineItem {
@@ -100,6 +111,10 @@ pub struct PipelineItem {
     #[serde(with = "time::serde::rfc3339::option")]
     pub next_interview_at: Option<OffsetDateTime>,
     pub closed_reason: Option<String>,
+    /// Append-only, chronological log of stage transitions parsed from the
+    /// `stage_history` comma-list. Malformed entries are dropped; file order
+    /// is preserved.
+    pub stage_history: Vec<StageEntry>,
 }
 
 /// Terminal stages: reaching one means the item is closed and the ball should
@@ -144,6 +159,10 @@ impl PipelineItem {
             last_activity_at: opt_string(fm, "last_activity_at"),
             next_interview_at: fm.get("next_interview_at").and_then(parse_rfc3339),
             closed_reason: opt_string(fm, "closed_reason"),
+            stage_history: fm
+                .get("stage_history")
+                .map(parse_stage_history)
+                .unwrap_or_default(),
         })
     }
 
@@ -183,6 +202,30 @@ fn parse_rfc3339(raw: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(raw.trim(), &Rfc3339).ok()
 }
 
+/// Parse the `stage_history` comma-list into ordered [`StageEntry`]s.
+///
+/// Each element is `"<stage>@<rfc3339>"`; it's split on the LAST `@` so a
+/// stage name may itself contain `@`. Entries with an empty stage, no `@`, or
+/// an unparseable timestamp are dropped (best-effort, consistent with the rest
+/// of this parser). File order is preserved.
+fn parse_stage_history(raw: &str) -> Vec<StageEntry> {
+    split_list(raw)
+        .into_iter()
+        .filter_map(|entry| {
+            let (stage, ts) = entry.rsplit_once('@')?;
+            let stage = stage.trim();
+            if stage.is_empty() {
+                return None;
+            }
+            let at = parse_rfc3339(ts)?;
+            Some(StageEntry {
+                stage: stage.to_string(),
+                at,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +250,7 @@ applied_at: 2026-09-16\n\
 last_activity_at: 2026-10-01T14:20:00Z\n\
 next_interview_at: 2026-10-10T09:00:00Z\n\
 closed_reason: ghosted\n\
+stage_history: \"lead@2026-09-14T09:00:00Z, interview@2026-09-20T14:00:00Z\"\n\
 ---\n\
 # Affirm\n\n## Timeline\n- 2026-09-16 — Applied.\n";
 
@@ -254,6 +298,9 @@ closed_reason: ghosted\n\
         );
         assert!(item.next_interview_at.is_some());
         assert_eq!(item.closed_reason.as_deref(), Some("ghosted"));
+        assert_eq!(item.stage_history.len(), 2);
+        assert_eq!(item.stage_history[0].stage, "lead");
+        assert_eq!(item.stage_history[1].stage, "interview");
         // ball=theirs, not a terminal stage → open.
         assert!(!item.is_closed());
     }
@@ -286,6 +333,7 @@ closed_reason: ghosted\n\
         assert!(item.contacts.is_empty());
         assert!(item.tags.is_empty());
         assert!(item.priority.is_none());
+        assert!(item.stage_history.is_empty());
         // ball defaults to None → closed.
         assert!(item.is_closed());
     }
@@ -340,6 +388,75 @@ closed_reason: ghosted\n\
         let open = parse("---\nkind: lead\ncompany: Acme\nstage: proposal\nball: ours\n---\n")
             .expect("valid");
         assert!(!open.is_closed());
+    }
+
+    #[test]
+    fn stage_history_parses_multiple_entries_in_file_order() {
+        let item = parse(
+            "---\nkind: lead\ncompany: Acme\nstage_history: \"lead@2026-09-14T09:00:00Z, interview@2026-09-20T14:00:00Z, offer@2026-09-28T10:00:00Z\"\n---\n",
+        )
+        .expect("valid");
+        let stages: Vec<&str> = item
+            .stage_history
+            .iter()
+            .map(|e| e.stage.as_str())
+            .collect();
+        assert_eq!(stages, vec!["lead", "interview", "offer"]);
+        // Timestamps parsed and kept in file order (chronological here).
+        assert!(item.stage_history[0].at < item.stage_history[1].at);
+        assert!(item.stage_history[1].at < item.stage_history[2].at);
+    }
+
+    #[test]
+    fn stage_history_drops_malformed_entries_but_keeps_good_ones() {
+        let item = parse(
+            "---\nkind: lead\ncompany: Acme\nstage_history: \"lead@2026-09-14T09:00:00Z, broken@not-a-date, @2026-09-20T14:00:00Z, offer@2026-09-28T10:00:00Z\"\n---\n",
+        )
+        .expect("valid");
+        // `broken@not-a-date` (bad timestamp) and `@...` (empty stage) dropped.
+        let stages: Vec<&str> = item
+            .stage_history
+            .iter()
+            .map(|e| e.stage.as_str())
+            .collect();
+        assert_eq!(stages, vec!["lead", "offer"]);
+    }
+
+    #[test]
+    fn stage_history_entry_without_at_is_skipped() {
+        let item = parse(
+            "---\nkind: lead\ncompany: Acme\nstage_history: \"nostamp, lead@2026-09-14T09:00:00Z\"\n---\n",
+        )
+        .expect("valid");
+        let stages: Vec<&str> = item
+            .stage_history
+            .iter()
+            .map(|e| e.stage.as_str())
+            .collect();
+        assert_eq!(stages, vec!["lead"]);
+    }
+
+    #[test]
+    fn stage_history_empty_or_missing_is_empty_vec() {
+        let missing = parse("---\nkind: lead\ncompany: Acme\n---\n").expect("valid");
+        assert!(missing.stage_history.is_empty());
+        let empty =
+            parse("---\nkind: lead\ncompany: Acme\nstage_history: \"\"\n---\n").expect("valid");
+        assert!(empty.stage_history.is_empty());
+    }
+
+    #[test]
+    fn stage_history_serializes_entries_with_rfc3339_timestamps() {
+        let item = parse(
+            "---\nkind: lead\ncompany: Acme\nstage_history: \"lead@2026-09-14T09:00:00Z, offer@2026-09-28T10:00:00Z\"\n---\n",
+        )
+        .expect("valid");
+        let json = serde_json::to_value(&item).expect("serializes");
+        let hist = &json["stage_history"];
+        assert_eq!(hist[0]["stage"], "lead");
+        assert_eq!(hist[0]["at"], "2026-09-14T09:00:00Z");
+        assert_eq!(hist[1]["stage"], "offer");
+        assert_eq!(hist[1]["at"], "2026-09-28T10:00:00Z");
     }
 
     #[test]
