@@ -78,6 +78,15 @@
 	function toggleAutoplay() {
 		autoplay = !autoplay;
 		cacheAutoplayPref(autoplay);
+		// Turning autoplay OFF while it's mid-playback must actually stop it.
+		// The autoplay effect fires `play()` the moment models are ready — which,
+		// with cached models, happens on open before the user can untick — so
+		// flipping the flag alone would leave the already-started audio playing
+		// ("I unticked autoplay and it played anyway"). If it hasn't started yet
+		// (still idle), the `!autoplay` guard in the effect prevents it firing.
+		if (!autoplay && playState !== 'idle') {
+			stop();
+		}
 	}
 
 	// Plain (non-reactive) guard: this component instance is created fresh each
