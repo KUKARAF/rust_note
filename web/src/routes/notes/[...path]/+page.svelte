@@ -10,6 +10,7 @@
 	import Button from '$lib/design/Button.svelte';
 	import ShareDialog from '$lib/share/ShareDialog.svelte';
 	import TrackValueDialog from '$lib/notes/TrackValueDialog.svelte';
+	import TtsDialog from '$lib/notes/TtsDialog.svelte';
 	import ExcalidrawView from '$lib/notes/ExcalidrawView.svelte';
 	import { isExcalidrawNote, parseExcalidrawScene } from '$lib/notes/excalidraw';
 	import { DAILY_NOTE_RE } from '$lib/notes/daily';
@@ -79,6 +80,16 @@
 
 	let shareDialogOpen = $state(false);
 	let trackDialogOpen = $state(false);
+	// TTS modal: `ttsText` holds whatever was last requested to be read aloud —
+	// either the whole note (filename speaker button) or a selection (the
+	// floating button inside CodeMirrorEditor).
+	let ttsModalOpen = $state(false);
+	let ttsText = $state('');
+
+	function openTts(selectedText: string) {
+		ttsText = selectedText;
+		ttsModalOpen = true;
+	}
 	// Metric tracking only applies to daily notes (diary/YYYY-MM-DD).
 	const isDailyNote = $derived(DAILY_NOTE_RE.test(data.path));
 
@@ -450,6 +461,11 @@
 				>
 			</h1>
 			<div class="editor-header-actions">
+				{#if session && editorReady}
+					<Button variant="outline" size="sm" onclick={() => openTts(liveContent || restContent)}>
+						🔊
+					</Button>
+				{/if}
 				{#if aiEditing}
 					<span class="ai-editing-chip" title="#AI! is applying edits to this note">
 						<PulsingDot color="var(--kv-accent)" />
@@ -488,6 +504,10 @@
 
 		{#if trackDialogOpen && session}
 			<TrackValueDialog ytext={session.ytext} onclose={() => (trackDialogOpen = false)} />
+		{/if}
+
+		{#if ttsModalOpen}
+			<TtsDialog text={ttsText} onclose={() => (ttsModalOpen = false)} />
 		{/if}
 
 		{#if drawingEditorOpen && session}
@@ -530,6 +550,7 @@
 				}}
 				onChange={onEditorChange}
 				{onSave}
+				onSpeakSelection={openTts}
 			/>
 		{:else}
 			<!-- Read-only preview from REST until the room syncs (or if the WS is

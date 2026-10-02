@@ -16,6 +16,7 @@ mod share;
 mod state;
 mod stats;
 mod todos;
+mod tts;
 
 use std::sync::Arc;
 

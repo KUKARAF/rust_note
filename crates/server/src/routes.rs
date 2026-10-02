@@ -21,6 +21,7 @@ use crate::share;
 use crate::state::AppState;
 use crate::stats;
 use crate::todos;
+use crate::tts;
 
 /// Maximum accepted request body size. A note is plain markdown; 1 MiB is far
 /// above any reasonable note yet cheaply rejects a body meant to exhaust
@@ -59,6 +60,7 @@ pub fn build(state: AppState) -> Router {
         .merge(todos::query::router())
         .merge(pipeline::routes::router())
         .merge(settings::routes::router())
+        .merge(tts::routes::router())
         .merge(stats::routes::router())
         .merge(recurring::routes::router())
         .merge(share::router())

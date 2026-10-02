@@ -7,8 +7,8 @@
 	// (not `value`) is the source of truth. Without `collab` it degrades to a
 	// plain single-user editor bound to `value`.
 	import { onMount, onDestroy } from 'svelte';
-	import { EditorView, keymap } from '@codemirror/view';
-	import { Compartment, EditorState, Prec, type Extension } from '@codemirror/state';
+	import { EditorView, keymap, showTooltip, tooltips, type Tooltip } from '@codemirror/view';
+	import { Compartment, EditorState, Prec, StateField, type Extension } from '@codemirror/state';
 	import { markdown } from '@codemirror/lang-markdown';
 	import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 	import { tags } from '@lezer/highlight';
@@ -28,6 +28,7 @@
 		onChange,
 		onBlur,
 		onSave,
+		onSpeakSelection,
 		collab = null,
 		editable = true,
 		extensions = []
@@ -40,6 +41,11 @@
 		onBlur?: () => void;
 		/** Called when the user presses Ctrl+S / Cmd+S inside the editor. */
 		onSave?: () => void;
+		/**
+		 * Called with the currently selected text when the floating "🔊" selection
+		 * button (shown above the selection head while it's non-empty) is clicked.
+		 */
+		onSpeakSelection?: (text: string) => void;
 		/**
 		 * When provided, the editor collaborates via this shared Yjs text +
 		 * awareness instead of the `value` binding. Must be stable for the
@@ -64,6 +70,59 @@
 	// Lets `editable` be toggled after mount (e.g. if a share link's
 	// permission were ever re-resolved) without recreating the whole editor.
 	const editableCompartment = new Compartment();
+
+	// Floating "🔊" button above the selection head whenever the selection is
+	// non-empty (speaker-icon equivalent of OS-level "read selection aloud").
+	// CM6 owns positioning/scrolling via the `showTooltip` facet, which is far
+	// more reliable here than a manually-positioned DOM overlay keyed off
+	// `window.getSelection()` (CM draws its own selection, not a native one).
+	function speakSelectionTooltipField(onSpeak: (text: string) => void) {
+		function getTooltip(state: EditorState): Tooltip | null {
+			const sel = state.selection.main;
+			if (sel.empty) return null;
+			return {
+				pos: sel.head,
+				above: true,
+				strictSide: true,
+				arrow: false,
+				create: (view) => {
+					const dom = document.createElement('button');
+					dom.type = 'button';
+					dom.className = 'cm-speak-selection-btn';
+					dom.textContent = '🔊';
+					dom.setAttribute('aria-label', 'Read selection aloud');
+					dom.title = 'Read selection aloud';
+					// Slice at click time (not closure-captured from when the
+					// tooltip was created) — remote collab edits can shift the
+					// selection range between render and click.
+					dom.onmousedown = (e) => {
+						// Prevent the editor from losing/collapsing its selection
+						// before we've read it.
+						e.preventDefault();
+					};
+					dom.onclick = () => {
+						const { from, to } = view.state.selection.main;
+						if (from === to) return;
+						onSpeak(view.state.sliceDoc(from, to));
+					};
+					return { dom };
+				}
+			};
+		}
+
+		return StateField.define<readonly Tooltip[]>({
+			create(state) {
+				const tooltip = getTooltip(state);
+				return tooltip ? [tooltip] : [];
+			},
+			update(tooltips, tr) {
+				if (!tr.docChanged && !tr.selection) return tooltips;
+				const tooltip = getTooltip(tr.state);
+				return tooltip ? [tooltip] : [];
+			},
+			provide: (field) => showTooltip.computeN([field], (state) => state.field(field))
+		});
+	}
 
 	function saveKeymap() {
 		return keymap.of([
@@ -208,6 +267,8 @@
 					EditorState.readOnly.of(!editable)
 				]),
 				saveKeymap(),
+				tooltips(),
+				speakSelectionTooltipField((text) => onSpeakSelection?.(text)),
 				...collabExtensions,
 				EditorView.updateListener.of((update) => {
 					if (update.docChanged && !updatingFromOutside) {
@@ -274,5 +335,20 @@
 	.codemirror-editor :global(.cm-editor) {
 		height: 100%;
 		min-height: 60vh;
+	}
+
+	.codemirror-editor :global(.cm-speak-selection-btn) {
+		background: var(--surface-card);
+		border: 1px solid var(--border-accent);
+		border-radius: var(--radius-control);
+		color: var(--kv-accent);
+		font-size: 12px;
+		line-height: 1;
+		padding: 3px 5px;
+		cursor: pointer;
+	}
+
+	.codemirror-editor :global(.cm-speak-selection-btn:hover) {
+		opacity: 0.82;
 	}
 </style>

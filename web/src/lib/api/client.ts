@@ -127,3 +127,24 @@ export function apiPatch<TResponse>(
 export function apiDelete<TResponse>(path: string, options?: RequestOptions): Promise<TResponse> {
 	return request<TResponse>('DELETE', path, undefined, options);
 }
+
+/**
+ * Raw `fetch` against the backend with the same auth attached as the JSON
+ * helpers above (cookie session + bearer device token in app mode), but
+ * without assuming a JSON request/response body. Use this for endpoints that
+ * return binary payloads (e.g. `/api/tts`'s `audio/wav`), where `apiPost`'s
+ * `await response.json()` would throw. Callers are responsible for checking
+ * `res.ok` and reading the body (`.blob()`, `.text()`, etc.) themselves.
+ */
+export function rawFetch(path: string, init: RequestInit = {}): Promise<Response> {
+	const url = path.startsWith('http') ? path : `${API_BASE_URL}${path}`;
+	const deviceToken = getDeviceToken();
+	return fetch(url, {
+		...init,
+		credentials: 'include',
+		headers: {
+			...(deviceToken !== null ? { Authorization: `Bearer ${deviceToken}` } : {}),
+			...init.headers
+		}
+	});
+}
