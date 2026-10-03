@@ -351,4 +351,40 @@
 	.codemirror-editor :global(.cm-speak-selection-btn:hover) {
 		opacity: 0.82;
 	}
+
+	/* `#template!` inserter popup (see editor/templateInsert.ts). Styled here
+	   alongside the other CM tooltip (the speak button) since CodeMirror renders
+	   the tooltip DOM inside this host, outside normal component scoping. */
+	.codemirror-editor :global(.cm-template-popup) {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		background: var(--surface-card);
+		border: 1px solid var(--border-accent);
+		border-radius: var(--radius-control);
+		padding: 4px 6px;
+	}
+
+	.codemirror-editor :global(.cm-template-input) {
+		background: var(--surface-input);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-control);
+		color: var(--kv-ink);
+		font-family: var(--font-term);
+		font-size: var(--type-meta);
+		padding: 2px 6px;
+		min-width: 14rem;
+	}
+
+	.codemirror-editor :global(.cm-template-input:focus) {
+		outline: none;
+		border-color: var(--border-accent);
+	}
+
+	.codemirror-editor :global(.cm-template-status) {
+		font-family: var(--font-term);
+		font-size: var(--type-meta);
+		color: var(--kv-faint);
+		white-space: nowrap;
+	}
 </style>

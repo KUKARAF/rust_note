@@ -5,6 +5,8 @@
 	import { goto, beforeNavigate } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import CodeMirrorEditor from '$lib/editor/CodeMirrorEditor.svelte';
+	import { templateInsertExtension } from '$lib/editor/templateInsert';
+	import { toast } from '$lib/design/toasts';
 	import CollabPresence, { type PresencePeer } from '$lib/editor/CollabPresence.svelte';
 	import PulsingDot from '$lib/design/PulsingDot.svelte';
 	import Button from '$lib/design/Button.svelte';
@@ -90,6 +92,11 @@
 		ttsText = selectedText;
 		ttsModalOpen = true;
 	}
+
+	// `#template!` in-note inserter: a popup anchored at the marker lets the user
+	// pick a note under `templates/`, whose body then replaces the marker inline
+	// (see templateInsert.ts). Built once; the editor reads `extensions` at mount.
+	const editorExtensions = [templateInsertExtension({ onError: (m) => toast(m) })];
 	// Metric tracking only applies to daily notes (diary/YYYY-MM-DD).
 	const isDailyNote = $derived(DAILY_NOTE_RE.test(data.path));
 
@@ -551,6 +558,7 @@
 				onChange={onEditorChange}
 				{onSave}
 				onSpeakSelection={openTts}
+				extensions={editorExtensions}
 			/>
 		{:else}
 			<!-- Read-only preview from REST until the room syncs (or if the WS is
