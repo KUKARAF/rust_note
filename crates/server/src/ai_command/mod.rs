@@ -77,7 +77,10 @@ pub fn maybe_spawn(room: &Arc<Room>, state: &AppState, body: &str) {
     if ops::locate_command(body).is_none() {
         return;
     }
-    spawn_run(room, state);
+    // Flush backstop: no per-edit identity is available here (the flush isn't
+    // tied to a single editor). Any guest-written marker is already stripped by
+    // the owner-gated live path below before a flush can see it.
+    spawn_run(room, state, None);
 }
 
 /// Live detection hook, called from the inbound-edit path (`collab/ws.rs::
@@ -86,17 +89,21 @@ pub fn maybe_spawn(room: &Arc<Room>, state: &AppState, body: &str) {
 /// the run starts promptly instead of waiting for the 5s flush (RC1). Being
 /// server-side it works for every client, including the Android app. The shared
 /// [`INFLIGHT`] guard means this and the flush backstop can't double-fire.
-pub fn maybe_spawn_live(room: &Arc<Room>, state: &AppState, body: &str) {
+pub fn maybe_spawn_live(room: &Arc<Room>, state: &AppState, body: &str, editor_user_id: &str) {
     if !ops::has_confirmed_command(body) {
         return;
     }
-    spawn_run(room, state);
+    // Carry the triggering editor's identity so `run` can gate on note owner
+    // (H2): only the owner may spend the owner's LLM credits / feed the note to
+    // the model. A guest connection passes its (non-owner) guest id here.
+    spawn_run(room, state, Some(editor_user_id.to_string()));
 }
 
 /// Claim the in-flight slot and spawn the orchestration, or do nothing if a run
 /// is already in flight for this note. All real work is on the spawned task —
-/// the caller never blocks.
-fn spawn_run(room: &Arc<Room>, state: &AppState) {
+/// the caller never blocks. `editor` is the triggering editor's id for the live
+/// path, or `None` for the flush backstop (which has no per-edit identity).
+fn spawn_run(room: &Arc<Room>, state: &AppState, editor: Option<String>) {
     let Some(guard) = InflightGuard::try_acquire(&room.note_id) else {
         return; // already running for this note
     };
@@ -107,17 +114,40 @@ fn spawn_run(room: &Arc<Room>, state: &AppState) {
     tokio::spawn(async move {
         // Hold the guard for the whole run; released on drop.
         let _guard = guard;
-        run(state, note_id, fallback_owner).await;
+        run(state, note_id, fallback_owner, editor).await;
     });
 }
 
-/// Orchestrate one `#AI!` run against the note's live room.
-async fn run(state: AppState, note_id: String, fallback_owner: String) {
+/// Orchestrate one `#AI!` run against the note's live room. `editor` is the
+/// triggering editor's user id (live path) or `None` (flush backstop).
+async fn run(state: AppState, note_id: String, fallback_owner: String, editor: Option<String>) {
     // Resolve the note's owner for settings/key lookup (fall back to the
     // room's owner hint if the row is somehow missing).
     let owner = note_owner(&state, &note_id)
         .await
         .unwrap_or(fallback_owner.clone());
+
+    // H2 owner gate: only the note owner may trigger an `#AI!` run — otherwise an
+    // `edit`-share guest could spend the owner's LLM credits and feed
+    // attacker-influenced note text to the model (indirect prompt injection). A
+    // non-owner trigger strips the marker (so the flush backstop can't re-fire
+    // it) and does nothing else. The flush backstop (`editor == None`) is
+    // unattributed and allowed to proceed as the owner.
+    if let Some(editor) = &editor {
+        if editor != &owner {
+            let room = state
+                .rooms
+                .get_or_create(&note_id, &fallback_owner, &state)
+                .await;
+            crate::collab::write::apply_text_edit(&room, ops::strip_command_line);
+            state.rooms.release(room, state.clone());
+            tracing::info!(
+                note_id = %note_id,
+                "ai_command: non-owner #AI! trigger ignored (marker stripped)"
+            );
+            return;
+        }
+    }
 
     // Attach to the room ONCE (bumps the connection count so it isn't reaped
     // mid-run); release at the end.
@@ -185,15 +215,14 @@ async fn generate_and_apply(
             .map_err(|_| "could not load settings".to_string())?
     };
 
-    // Key resolution mirrors `todos/query.rs`: per-user key, else the server
-    // config key, else refuse.
-    let key = if !settings.openrouter_api_key.is_empty() {
-        settings.openrouter_api_key.clone()
-    } else if let Some(k) = &state.config.openrouter_api_key {
-        k.clone()
-    } else {
-        return Err("no AI API key configured".to_string());
-    };
+    // Key resolution mirrors `todos/query.rs`: per-user key always; the shared
+    // deployment key only when the endpoint is the server default (never leak it
+    // to a user-chosen custom host); else refuse.
+    let key = store::resolve_ai_key(
+        &settings.openrouter_api_key,
+        &settings.ai_endpoint,
+        state.config.openrouter_api_key.as_deref(),
+    )?;
 
     let endpoint = &settings.ai_endpoint;
     let model = &settings.ai_command_model;

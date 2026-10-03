@@ -154,7 +154,8 @@ async fn ws_handler(
     let color = share_identity::color_for_id(&user_id);
     let display_name = display_name_for(&state, &user_id).await;
 
-    let mut response = ws.on_upgrade(move |socket| handle_socket(socket, state, room, can_write));
+    let mut response =
+        ws.on_upgrade(move |socket| handle_socket(socket, state, room, can_write, user_id));
     if let Ok(v) = HeaderValue::from_str(&color) {
         response.headers_mut().insert("x-collab-user-color", v);
     }
@@ -228,7 +229,12 @@ async fn guest_ws_handler(
     // primitive this could later ride on).
     let guest = share_identity::GuestIdentity::new_random();
 
-    let mut response = ws.on_upgrade(move |socket| handle_socket(socket, state, room, can_write));
+    // The guest's random id is never a note-owner user id, so the `#AI!` owner
+    // gate (see `ai_command::maybe_spawn_live`) treats a guest trigger as a
+    // non-owner no-op — a guest can't spend the owner's LLM credits.
+    let editor_id = guest.id.clone();
+    let mut response =
+        ws.on_upgrade(move |socket| handle_socket(socket, state, room, can_write, editor_id));
     if let Ok(v) = HeaderValue::from_str(&guest.color) {
         response.headers_mut().insert("x-collab-user-color", v);
     }
@@ -254,7 +260,13 @@ impl Drop for ConnGuard {
 }
 
 /// Drive one WebSocket connection's sync loop.
-async fn handle_socket(mut socket: WebSocket, state: AppState, room: Arc<Room>, can_write: bool) {
+async fn handle_socket(
+    mut socket: WebSocket,
+    state: AppState,
+    room: Arc<Room>,
+    can_write: bool,
+    editor_id: String,
+) {
     let _guard = ConnGuard {
         room: room.clone(),
         state: state.clone(),
@@ -287,7 +299,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, room: Arc<Room>, 
                         // Handle the frame (mutations + relays happen inside),
                         // then send any replies destined for this socket.
                         let replies = process_frame(
-                            &room, &state, &data, conn_id, can_write, &mut controlled,
+                            &room, &state, &data, conn_id, can_write, &mut controlled, &editor_id,
                         );
                         if send_replies(&mut socket, replies).await.is_break() {
                             break;
@@ -384,6 +396,7 @@ fn process_frame(
     conn_id: u64,
     can_write: bool,
     controlled: &mut HashSet<ClientID>,
+    editor_id: &str,
 ) -> Vec<Vec<u8>> {
     // Replies to send back to *this* socket (e.g. SyncStep2 for a SyncStep1).
     let mut replies: Vec<Vec<u8>> = Vec::new();
@@ -431,7 +444,12 @@ fn process_frame(
                     // command with Enter, instead of waiting for the 5s flush
                     // (RC1). Server-side so it covers every client; the shared
                     // in-flight guard dedupes against the flush backstop.
-                    crate::ai_command::maybe_spawn_live(room, state, &room.snapshot_text());
+                    crate::ai_command::maybe_spawn_live(
+                        room,
+                        state,
+                        &room.snapshot_text(),
+                        editor_id,
+                    );
                 }
             }
             // Presence update: apply and relay (allowed even for read-only
@@ -489,7 +507,7 @@ mod tests {
         let step1 =
             Message::Sync(SyncMessage::SyncStep1(client.transact().state_vector())).encode_v1();
 
-        let replies = process_frame(&room, &state, &step1, 1, true, &mut HashSet::new());
+        let replies = process_frame(&room, &state, &step1, 1, true, &mut HashSet::new(), "admin");
         assert_eq!(replies.len(), 1, "expected a single SyncStep2 reply");
 
         // The reply is a SyncStep2 whose update brings the client in sync.
@@ -536,7 +554,15 @@ mod tests {
         };
         let frame = Message::Sync(SyncMessage::Update(update)).encode_v1();
 
-        let replies = process_frame(&room, &state, &frame, 99, true, &mut HashSet::new());
+        let replies = process_frame(
+            &room,
+            &state,
+            &frame,
+            99,
+            true,
+            &mut HashSet::new(),
+            "admin",
+        );
         assert!(replies.is_empty(), "an Update produces no direct reply");
         assert!(room.dirty.load(std::sync::atomic::Ordering::Acquire));
         assert!(room.snapshot_text().contains("appended "));
@@ -569,7 +595,7 @@ mod tests {
         let frame = Message::Awareness(peer.update().unwrap()).encode_v1();
 
         let mut controlled = HashSet::new();
-        let replies = process_frame(&room, &state, &frame, 42, true, &mut controlled);
+        let replies = process_frame(&room, &state, &frame, 42, true, &mut controlled, "admin");
         assert!(replies.is_empty());
         assert!(controlled.contains(&peer_client), "client id tracked");
 
@@ -625,7 +651,15 @@ mod tests {
         };
         let frame = Message::Sync(SyncMessage::Update(update)).encode_v1();
 
-        let replies = process_frame(&room, &state, &frame, 1, false, &mut HashSet::new());
+        let replies = process_frame(
+            &room,
+            &state,
+            &frame,
+            1,
+            false,
+            &mut HashSet::new(),
+            "admin",
+        );
         assert!(replies.is_empty());
         assert_eq!(room.snapshot_text(), "start\n");
         assert!(!room.dirty.load(std::sync::atomic::Ordering::Acquire));

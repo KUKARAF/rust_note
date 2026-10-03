@@ -158,17 +158,21 @@ async fn query_todos(
         store::load_or_bootstrap(&state, &user_id).await?
     };
 
-    let key = if !settings.openrouter_api_key.is_empty() {
-        settings.openrouter_api_key.clone()
-    } else if let Some(k) = &state.config.openrouter_api_key {
-        k.clone()
-    } else {
-        return Err(AppError::BadRequest(
-            "No AI API key configured — add one in Settings.".to_string(),
-        ));
-    };
+    // Only send the shared deployment key to the default endpoint; a custom
+    // endpoint requires the user's own key (else the deployment secret leaks).
+    let key = store::resolve_ai_key(
+        &settings.openrouter_api_key,
+        &settings.ai_endpoint,
+        state.config.openrouter_api_key.as_deref(),
+    )
+    .map_err(AppError::BadRequest)?;
 
     let url = chat_url(&settings.ai_endpoint);
+    // SSRF guard: refuse loopback/private/link-local/metadata targets before any
+    // outbound request is issued.
+    store::guard_outbound_url(&url)
+        .await
+        .map_err(AppError::BadRequest)?;
     let spec = call_ai(&url, &settings.openrouter_model, &key, body.nl.trim()).await?;
     Ok(Json(spec))
 }
