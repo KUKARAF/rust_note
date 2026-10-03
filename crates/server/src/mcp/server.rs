@@ -183,7 +183,7 @@ fn set_opt(fm: &mut Frontmatter, key: &str, val: Option<&str>) {
 /// Today's civil date (`YYYY-MM-DD`) in the default tracker timezone, used for
 /// the `- <today> — …` timeline prefix. Matches the stats module's default-tz
 /// convention (interviews/leads are local-calendar events for a one-person
-/// vault); the full `last_activity_at` timestamp stays RFC3339/UTC.
+/// vault).
 fn today_string() -> String {
     crate::stats::fmt_date(crate::stats::today_in_tz(crate::stats::DEFAULT_TZ))
 }
@@ -245,17 +245,10 @@ fn render_new_pipeline_note(kind_str: &str, args: &CreatePipelineArgs) -> String
     }
     set_opt(&mut fm, "expected_at", args.expected_at.as_deref());
     set_opt(&mut fm, "next_action", args.next_action.as_deref());
-    set_opt(&mut fm, "source", args.source.as_deref());
-    set_opt(&mut fm, "url", args.url.as_deref());
-    set_opt(&mut fm, "contract", args.contract.as_deref());
-    set_opt(&mut fm, "rate_asked", args.rate_asked.as_deref());
-    set_opt(&mut fm, "tags", args.tags.as_deref());
     set_opt(&mut fm, "contact", args.contact.as_deref());
     if let Some(p) = args.priority {
         fm.set("priority", &p.to_string());
     }
-    set_opt(&mut fm, "applied_at", args.applied_at.as_deref());
-    fm.set("last_activity_at", &acl::now_rfc3339());
 
     let heading = match role {
         Some(r) => format!("{company} — {r}"),
@@ -408,30 +401,12 @@ struct CreatePipelineArgs {
     /// The concrete next action the ball represents.
     #[serde(default)]
     next_action: Option<String>,
-    /// Where it came from (justjoin / referral / inbound / …).
-    #[serde(default)]
-    source: Option<String>,
-    /// Posting or contact link.
-    #[serde(default)]
-    url: Option<String>,
-    /// Contract type (B2B / UoP / …).
-    #[serde(default)]
-    contract: Option<String>,
-    /// Rate asked, e.g. `200 PLN/h +VAT`.
-    #[serde(default)]
-    rate_asked: Option<String>,
-    /// Comma-separated tags, e.g. `ai, remote, german`.
-    #[serde(default)]
-    tags: Option<String>,
     /// Comma-separated `Name <email> (role)` contact entries.
     #[serde(default)]
     contact: Option<String>,
     /// Priority 1–5 (higher = chase harder).
     #[serde(default)]
     priority: Option<u8>,
-    /// Date applied / first contact, `YYYY-MM-DD`.
-    #[serde(default)]
-    applied_at: Option<String>,
     /// Optional markdown body, inserted above the `## Timeline` section.
     #[serde(default)]
     note: Option<String>,
@@ -456,25 +431,9 @@ struct UpdatePipelineArgs {
     #[serde(default)]
     next_action: Option<String>,
     #[serde(default)]
-    source: Option<String>,
-    #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    contract: Option<String>,
-    #[serde(default)]
-    rate_asked: Option<String>,
-    #[serde(default)]
-    rate_offered: Option<String>,
-    #[serde(default)]
     contact: Option<String>,
     #[serde(default)]
-    tags: Option<String>,
-    #[serde(default)]
     priority: Option<u8>,
-    #[serde(default)]
-    applied_at: Option<String>,
-    #[serde(default)]
-    next_interview_at: Option<String>,
     #[serde(default)]
     closed_reason: Option<String>,
 }
@@ -482,7 +441,6 @@ struct UpdatePipelineArgs {
 impl UpdatePipelineArgs {
     /// Collect the supplied frontmatter keys to `set`, trimmed and non-blank.
     /// `kind`/`ball` are normalized lowercase; `priority` is stringified.
-    /// `last_activity_at` is deliberately NOT here — the caller always bumps it.
     fn frontmatter_updates(&self) -> Vec<(&'static str, String)> {
         let mut out: Vec<(&'static str, String)> = Vec::new();
         for (key, val) in [
@@ -491,15 +449,7 @@ impl UpdatePipelineArgs {
             ("stage", &self.stage),
             ("expected_at", &self.expected_at),
             ("next_action", &self.next_action),
-            ("source", &self.source),
-            ("url", &self.url),
-            ("contract", &self.contract),
-            ("rate_asked", &self.rate_asked),
-            ("rate_offered", &self.rate_offered),
             ("contact", &self.contact),
-            ("tags", &self.tags),
-            ("applied_at", &self.applied_at),
-            ("next_interview_at", &self.next_interview_at),
             ("closed_reason", &self.closed_reason),
         ] {
             if let Some(v) = val.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -1030,7 +980,7 @@ impl McpServer {
 
     #[tool(
         description = "Update frontmatter fields on an existing pipeline item (merge; untouched \
-                       keys kept). Bumps last_activity_at. Writes through the collab room."
+                       keys kept). Writes through the collab room."
     )]
     async fn update_pipeline_item(
         &self,
@@ -1047,14 +997,12 @@ impl McpServer {
             return Ok(app_error_to_tool(e));
         }
         let fields = args.frontmatter_updates();
-        let now = acl::now_rfc3339();
         let id = args.id.clone();
         let applied = edit_note_through_room(&self.state, &args.id, &user, move |old| {
             let mut fm = Frontmatter::parse(old);
             for (key, value) in &fields {
                 fm.set(key, value);
             }
-            fm.set("last_activity_at", &now);
             Some(fm.render())
         })
         .await
@@ -1070,7 +1018,7 @@ impl McpServer {
 
     #[tool(
         description = "Log a timeline event on a pipeline item: prepends `- <today> — <line>` \
-                       under the body `## Timeline`, bumps last_activity_at, and applies any of \
+                       under the body `## Timeline`, and applies any of \
                        ball/expected_at/stage/next_action. Writes through the collab room."
     )]
     async fn log_pipeline_event(
@@ -1094,7 +1042,6 @@ impl McpServer {
             )]));
         }
         let entry = format!("- {} — {}", today_string(), line);
-        let now = acl::now_rfc3339();
 
         let mut fields: Vec<(&'static str, String)> = Vec::new();
         if let Some(v) = args
@@ -1121,7 +1068,6 @@ impl McpServer {
             for (key, value) in &fields {
                 fm.set(key, value);
             }
-            fm.set("last_activity_at", &now);
             fm.body = prepend_timeline(&fm.body, &entry);
             Some(fm.render())
         })

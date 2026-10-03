@@ -94,22 +94,10 @@ pub struct PipelineItem {
     #[serde(with = "time::serde::rfc3339::option")]
     pub expected_at: Option<OffsetDateTime>,
     pub next_action: Option<String>,
-    pub source: Option<String>,
-    pub url: Option<String>,
-    pub contract: Option<String>,
-    pub rate_asked: Option<String>,
-    pub rate_offered: Option<String>,
     /// `contact` comma-list, trimmed, empties dropped.
     pub contacts: Vec<String>,
-    /// `tags` comma-list, trimmed, empties dropped.
-    pub tags: Vec<String>,
     /// Parsed `1..=5`; out-of-range or non-integer degrades to `None`.
     pub priority: Option<u8>,
-    pub applied_at: Option<String>,
-    pub last_activity_at: Option<String>,
-    /// Parsed RFC3339; unparseable input degrades to `None`.
-    #[serde(with = "time::serde::rfc3339::option")]
-    pub next_interview_at: Option<OffsetDateTime>,
     pub closed_reason: Option<String>,
     /// Append-only, chronological log of stage transitions parsed from the
     /// `stage_history` comma-list. Malformed entries are dropped; file order
@@ -144,20 +132,11 @@ impl PipelineItem {
             ball: fm.get("ball").map(Ball::parse).unwrap_or_default(),
             expected_at: fm.get("expected_at").and_then(parse_rfc3339),
             next_action: opt_string(fm, "next_action"),
-            source: opt_string(fm, "source"),
-            url: opt_string(fm, "url"),
-            contract: opt_string(fm, "contract"),
-            rate_asked: opt_string(fm, "rate_asked"),
-            rate_offered: opt_string(fm, "rate_offered"),
             contacts: fm.get("contact").map(split_list).unwrap_or_default(),
-            tags: fm.get("tags").map(split_list).unwrap_or_default(),
             priority: fm
                 .get("priority")
                 .and_then(|s| s.trim().parse::<u8>().ok())
                 .filter(|n| (1..=5).contains(n)),
-            applied_at: opt_string(fm, "applied_at"),
-            last_activity_at: opt_string(fm, "last_activity_at"),
-            next_interview_at: fm.get("next_interview_at").and_then(parse_rfc3339),
             closed_reason: opt_string(fm, "closed_reason"),
             stage_history: fm
                 .get("stage_history")
@@ -238,17 +217,8 @@ stage: interview\n\
 ball: theirs\n\
 expected_at: 2026-10-08T12:00:00Z\n\
 next_action: await reschedule\n\
-source: referral\n\
-url: https://example.com/job\n\
-contract: UoP\n\
-rate_asked: 200 PLN/h +VAT\n\
-rate_offered: 180 PLN/h\n\
 contact: Paulina Syberska <p@affirm.com> (coordinator), Aakash <a@affirm.com>\n\
-tags: ai, remote, us-hours\n\
 priority: 4\n\
-applied_at: 2026-09-16\n\
-last_activity_at: 2026-10-01T14:20:00Z\n\
-next_interview_at: 2026-10-10T09:00:00Z\n\
 closed_reason: ghosted\n\
 stage_history: \"lead@2026-09-14T09:00:00Z, interview@2026-09-20T14:00:00Z\"\n\
 ---\n\
@@ -270,11 +240,6 @@ stage_history: \"lead@2026-09-14T09:00:00Z, interview@2026-09-20T14:00:00Z\"\n\
         assert_eq!(item.ball, Ball::Theirs);
         assert!(item.expected_at.is_some());
         assert_eq!(item.next_action.as_deref(), Some("await reschedule"));
-        assert_eq!(item.source.as_deref(), Some("referral"));
-        assert_eq!(item.url.as_deref(), Some("https://example.com/job"));
-        assert_eq!(item.contract.as_deref(), Some("UoP"));
-        assert_eq!(item.rate_asked.as_deref(), Some("200 PLN/h +VAT"));
-        assert_eq!(item.rate_offered.as_deref(), Some("180 PLN/h"));
         assert_eq!(
             item.contacts,
             vec![
@@ -282,21 +247,7 @@ stage_history: \"lead@2026-09-14T09:00:00Z, interview@2026-09-20T14:00:00Z\"\n\
                 "Aakash <a@affirm.com>".to_string(),
             ]
         );
-        assert_eq!(
-            item.tags,
-            vec![
-                "ai".to_string(),
-                "remote".to_string(),
-                "us-hours".to_string()
-            ]
-        );
         assert_eq!(item.priority, Some(4));
-        assert_eq!(item.applied_at.as_deref(), Some("2026-09-16"));
-        assert_eq!(
-            item.last_activity_at.as_deref(),
-            Some("2026-10-01T14:20:00Z")
-        );
-        assert!(item.next_interview_at.is_some());
         assert_eq!(item.closed_reason.as_deref(), Some("ghosted"));
         assert_eq!(item.stage_history.len(), 2);
         assert_eq!(item.stage_history[0].stage, "lead");
@@ -331,7 +282,6 @@ stage_history: \"lead@2026-09-14T09:00:00Z, interview@2026-09-20T14:00:00Z\"\n\
         assert!(item.role.is_none());
         assert!(item.expected_at.is_none());
         assert!(item.contacts.is_empty());
-        assert!(item.tags.is_empty());
         assert!(item.priority.is_none());
         assert!(item.stage_history.is_empty());
         // ball defaults to None → closed.
@@ -340,14 +290,8 @@ stage_history: \"lead@2026-09-14T09:00:00Z, interview@2026-09-20T14:00:00Z\"\n\
 
     #[test]
     fn comma_lists_are_split_trimmed_and_empties_dropped() {
-        let item = parse(
-            "---\nkind: lead\ncompany: Acme\ntags: ai,  remote ,,german,\ncontact: A <a@x>, , B <b@x>\n---\n",
-        )
-        .expect("valid");
-        assert_eq!(
-            item.tags,
-            vec!["ai".to_string(), "remote".to_string(), "german".to_string()]
-        );
+        let item = parse("---\nkind: lead\ncompany: Acme\ncontact: A <a@x>, , B <b@x>\n---\n")
+            .expect("valid");
         assert_eq!(
             item.contacts,
             vec!["A <a@x>".to_string(), "B <b@x>".to_string()]
@@ -356,12 +300,9 @@ stage_history: \"lead@2026-09-14T09:00:00Z, interview@2026-09-20T14:00:00Z\"\n\
 
     #[test]
     fn bad_rfc3339_timestamp_degrades_to_none() {
-        let item = parse(
-            "---\nkind: lead\ncompany: Acme\nexpected_at: not-a-date\nnext_interview_at: 2026-13-99\n---\n",
-        )
-        .expect("item still valid even with bad timestamps");
+        let item = parse("---\nkind: lead\ncompany: Acme\nexpected_at: not-a-date\n---\n")
+            .expect("item still valid even with bad timestamps");
         assert!(item.expected_at.is_none());
-        assert!(item.next_interview_at.is_none());
     }
 
     #[test]
