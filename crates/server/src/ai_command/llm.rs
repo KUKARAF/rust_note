@@ -111,6 +111,9 @@ pub async fn call_model(
     instruction: &str,
 ) -> Result<String, String> {
     let url = chat_url(endpoint);
+    // SSRF guard: refuse loopback/private/link-local/metadata targets before any
+    // outbound request is issued.
+    crate::settings::store::guard_outbound_url(&url).await?;
     let request_body = request_body(model, body, instruction, false);
 
     // Harden the outbound client like the todo-query one: no redirects (SSRF)
@@ -168,6 +171,9 @@ pub async fn call_model_streaming(
     instruction: &str,
 ) -> Result<mpsc::Receiver<Result<String, String>>, String> {
     let url = chat_url(endpoint);
+    // SSRF guard: refuse loopback/private/link-local/metadata targets before any
+    // outbound request is issued.
+    crate::settings::store::guard_outbound_url(&url).await?;
     let request_body = request_body(model, body, instruction, true);
 
     // No whole-response `.timeout()` here: streaming is bounded by the caller's
@@ -195,8 +201,13 @@ pub async fn call_model_streaming(
     let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAP);
     tokio::spawn(async move {
         let mut stream = resp.bytes_stream();
-        // SSE lines don't align to network chunks; buffer and split on '\n',
-        // keeping the trailing partial line.
+        // Neither SSE lines nor multi-byte UTF-8 chars align to network chunks.
+        // `pending` holds raw bytes not yet decodable (a char straddling a chunk
+        // boundary stays here until its remaining bytes arrive — decoding each
+        // chunk lossily would corrupt both halves into U+FFFD). `buf` holds
+        // decoded text awaiting a '\n' line split, keeping the trailing partial
+        // line.
+        let mut pending: Vec<u8> = Vec::new();
         let mut buf = String::new();
         while let Some(next) = stream.next().await {
             let bytes = match next {
@@ -206,7 +217,8 @@ pub async fn call_model_streaming(
                     return;
                 }
             };
-            buf.push_str(&String::from_utf8_lossy(&bytes));
+            pending.extend_from_slice(&bytes);
+            buf.push_str(&drain_decodable(&mut pending));
             while let Some(nl) = buf.find('\n') {
                 let line: String = buf.drain(..=nl).collect();
                 match handle_sse_line(line.trim_end()) {
@@ -218,6 +230,16 @@ pub async fn call_model_streaming(
                     SseLine::Done => return,
                     SseLine::Ignore => {}
                 }
+            }
+        }
+        // Stream ended: flush any valid decoded remainder as a final (newline-
+        // less) SSE line. Normal SSE lines end with '\n', so this is defensive;
+        // an incomplete trailing char in `pending` is simply dropped.
+        buf.push_str(&drain_decodable(&mut pending));
+        let tail = buf.trim_end();
+        if !tail.is_empty() {
+            if let SseLine::Content(content) = handle_sse_line(tail) {
+                let _ = tx.send(Ok(content)).await;
             }
         }
     });
@@ -259,9 +281,82 @@ fn handle_sse_line(line: &str) -> SseLine {
     }
 }
 
+/// Drain the maximal validly-decodable UTF-8 prefix of `pending` into a new
+/// `String`, leaving only a trailing *incomplete* multi-byte sequence buffered
+/// for the next chunk. This is the fix for the streaming corruption bug: a char
+/// whose bytes straddle a chunk boundary is never turned into U+FFFD — its bytes
+/// stay in `pending` until the rest arrives. Genuinely invalid bytes (not a
+/// boundary split) are replaced with one U+FFFD each and skipped so they can't
+/// wedge the buffer forever.
+fn drain_decodable(pending: &mut Vec<u8>) -> String {
+    let mut out = String::new();
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(s) => {
+                out.push_str(s);
+                pending.clear();
+                return out;
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                if let Some(prefix) = pending.get(..valid) {
+                    if let Ok(s) = std::str::from_utf8(prefix) {
+                        out.push_str(s);
+                    }
+                }
+                match e.error_len() {
+                    // Incomplete trailing sequence: keep it for the next chunk.
+                    None => {
+                        pending.drain(..valid);
+                        return out;
+                    }
+                    // Genuinely invalid bytes: emit one replacement and skip them,
+                    // then keep decoding the remainder.
+                    Some(bad) => {
+                        out.push('\u{FFFD}');
+                        pending.drain(..valid + bad);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drain_decodable_reassembles_multibyte_char_split_across_chunks() {
+        // Em dash (U+2014) is 3 bytes (E2 80 94); split it mid-character across
+        // two chunk slices and assert the reassembled text has no U+FFFD.
+        let text = "a—b"; // 'a', em dash, 'b'
+        let bytes = text.as_bytes();
+        let (chunk1, chunk2) = bytes.split_at(2); // 'a' + first em-dash byte
+
+        let mut pending: Vec<u8> = Vec::new();
+        let mut out = String::new();
+
+        pending.extend_from_slice(chunk1);
+        out.push_str(&drain_decodable(&mut pending));
+        assert_eq!(out, "a", "only the complete prefix decodes so far");
+        assert_eq!(pending, vec![0xE2], "partial char bytes are carried over");
+
+        pending.extend_from_slice(chunk2);
+        out.push_str(&drain_decodable(&mut pending));
+
+        assert_eq!(out, "a—b");
+        assert!(!out.contains('\u{FFFD}'), "no replacement chars introduced");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn drain_decodable_replaces_only_genuinely_invalid_bytes() {
+        let mut pending = vec![0xFF, b'x'];
+        let out = drain_decodable(&mut pending);
+        assert_eq!(out, "\u{FFFD}x");
+        assert!(pending.is_empty());
+    }
 
     #[test]
     fn sse_line_parsing_extracts_content_and_terminates() {

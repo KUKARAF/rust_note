@@ -71,19 +71,25 @@ async fn synthesize(
         store::load_or_bootstrap(&state, &user_id).await?
     };
 
-    // Resolve the key exactly like `get_ai_models`: settings, else env, else
-    // BadRequest. The key only ever rides in the Authorization header below.
-    let key = if !settings.openrouter_api_key.is_empty() {
-        settings.openrouter_api_key.clone()
-    } else if let Some(k) = &state.config.openrouter_api_key {
-        k.clone()
-    } else {
-        return Err(AppError::BadRequest(
-            "No AI API key configured — add one in Settings.".to_string(),
-        ));
-    };
+    // Resolve the key like `get_ai_models`, but only send the shared deployment
+    // key to the default endpoint — a custom endpoint requires the user's own
+    // key (else the deployment secret leaks). The key only ever rides in the
+    // Authorization header below.
+    let key = store::resolve_ai_key(
+        &settings.openrouter_api_key,
+        &settings.ai_endpoint,
+        state.config.openrouter_api_key.as_deref(),
+    )
+    .map_err(AppError::BadRequest)?;
 
     let endpoint = settings.ai_endpoint.as_str();
+
+    // SSRF guard: refuse loopback/private/link-local/metadata targets before any
+    // outbound request. `validate_tts_model` (below) and the speech POST share a
+    // host, so one guard on the endpoint covers both.
+    store::guard_outbound_url(&speech_url(endpoint))
+        .await
+        .map_err(AppError::BadRequest)?;
 
     // Reject non-TTS models server-side so we never send a (potentially huge)
     // text body to a chat model.

@@ -121,6 +121,125 @@ pub fn is_valid_model_id(model: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | ':'))
 }
 
+/// Whether `endpoint` (after trimming + an empty→default fallback, mirroring
+/// `chat_url`/`speech_url`) is the server's configured default AI endpoint.
+///
+/// Used to decide whether the shared deployment key may be sent: it must only
+/// ever travel to the default endpoint, never to a user-chosen custom host.
+pub fn endpoint_is_default(endpoint: &str) -> bool {
+    let base = endpoint.trim().trim_end_matches('/');
+    let base = if base.is_empty() {
+        DEFAULT_AI_ENDPOINT
+    } else {
+        base
+    };
+    base == DEFAULT_AI_ENDPOINT.trim_end_matches('/')
+}
+
+/// Resolve which API key to send for an outbound AI call (chat / todo-query /
+/// TTS), enforcing the key-leak rule: the per-user key is always allowed, but
+/// the shared deployment key (`config.openrouter_api_key`) is only used when the
+/// resolved endpoint is the server default — never when the user points at a
+/// custom host (otherwise the deployment-wide secret would leak to it).
+///
+/// `Err(reason)` is a short, user-safe `BadRequest`-style message. Callers that
+/// return [`AppError`] can `.map_err(AppError::BadRequest)`.
+pub fn resolve_ai_key(
+    settings_key: &str,
+    endpoint: &str,
+    shared_key: Option<&str>,
+) -> Result<String, String> {
+    if !settings_key.is_empty() {
+        return Ok(settings_key.to_string());
+    }
+    if endpoint_is_default(endpoint) {
+        if let Some(k) = shared_key.filter(|k| !k.is_empty()) {
+            return Ok(k.to_string());
+        }
+        return Err("No AI API key configured — add one in Settings.".to_string());
+    }
+    Err("Set your own API key in Settings to use a custom AI endpoint.".to_string())
+}
+
+/// Reject an outbound AI request URL that targets a non-public address (SSRF
+/// guard). Parses `url`, requires an `http`/`https` scheme, resolves the host,
+/// and refuses if ANY resolved address is loopback, private, link-local
+/// (including the `169.254.169.254` cloud-metadata address), unique-local,
+/// unspecified, or broadcast. `Err(reason)` is a short, user-safe message.
+///
+/// DNS is resolved asynchronously (`tokio::net::lookup_host`) so a slow resolver
+/// can't block a runtime worker. Note this is a resolve-then-check: it does not
+/// pin the address reqwest later dials, so it is not a defense against a
+/// deliberate DNS-rebind race — it blocks the common misconfiguration/SSRF cases
+/// (metadata, loopback, RFC1918) as specified.
+pub async fn guard_outbound_url(url: &str) -> Result<(), String> {
+    let parsed =
+        reqwest::Url::parse(url.trim()).map_err(|_| "invalid AI endpoint URL".to_string())?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("unsupported AI endpoint scheme: {other}")),
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "AI endpoint has no host".to_string())?;
+    let port = parsed.port_or_known_default().unwrap_or(443);
+
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|_| "could not resolve the AI endpoint host".to_string())?;
+    let mut resolved_any = false;
+    for addr in addrs {
+        resolved_any = true;
+        if is_blocked_ip(addr.ip()) {
+            return Err("the AI endpoint resolves to a disallowed address".to_string());
+        }
+    }
+    if !resolved_any {
+        return Err("the AI endpoint host did not resolve".to_string());
+    }
+    Ok(())
+}
+
+/// Whether `ip` is in a range outbound AI requests must never reach.
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => is_blocked_v4(v4),
+        std::net::IpAddr::V6(v6) => {
+            // An IPv4-mapped v6 address (`::ffff:a.b.c.d`) is really its v4.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_blocked_v4(v4);
+            }
+            is_blocked_v6(v6)
+        }
+    }
+}
+
+/// Blocked IPv4 ranges: loopback (127/8), RFC1918 private (10/8, 172.16/12,
+/// 192.168/16), link-local (169.254/16 — includes `169.254.169.254` metadata),
+/// unspecified (0.0.0.0, 0/8), broadcast, and carrier-grade NAT (100.64/10).
+fn is_blocked_v4(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || o[0] == 0
+        || (o[0] == 100 && (o[1] & 0xc0) == 0x40)
+}
+
+/// Blocked IPv6 ranges: loopback (`::1`), unspecified (`::`), unique-local
+/// (`fc00::/7`), and link-local unicast (`fe80::/10`). The unstable
+/// `Ipv6Addr::is_unique_local`/`is_unicast_link_local` helpers are avoided in
+/// favor of explicit prefix checks so this builds on stable Rust.
+fn is_blocked_v6(ip: std::net::Ipv6Addr) -> bool {
+    let seg = ip.segments();
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || (ip.octets()[0] & 0xfe) == 0xfc
+        || (seg[0] & 0xffc0) == 0xfe80
+}
+
 /// The (git-backed) note id under which `user_id`'s settings are stored.
 /// Distinct per user, so two users' settings notes never collide and are
 /// governed by the same ACL as any other note (i.e. nobody but the owner
@@ -548,5 +667,100 @@ mod tests {
             let s = parse_settings_tolerant(&format!("---\nnotify_enabled: {v}\n---\n"));
             assert!(!s.notify_enabled, "{v:?} must not enable notify");
         }
+    }
+
+    #[test]
+    fn endpoint_is_default_normalizes_trailing_slash_and_blank() {
+        assert!(endpoint_is_default(DEFAULT_AI_ENDPOINT));
+        assert!(endpoint_is_default(&format!("  {DEFAULT_AI_ENDPOINT}/  ")));
+        assert!(endpoint_is_default("")); // blank falls back to the default
+        assert!(!endpoint_is_default("https://evil.example.com/v1"));
+        assert!(!endpoint_is_default("http://127.0.0.1:11434/v1"));
+    }
+
+    #[test]
+    fn resolve_ai_key_prefers_user_key_always() {
+        // A per-user key is sent regardless of endpoint (default OR custom).
+        assert_eq!(
+            resolve_ai_key("user-key", "https://custom.example.com/v1", Some("shared")).unwrap(),
+            "user-key"
+        );
+        assert_eq!(
+            resolve_ai_key("user-key", DEFAULT_AI_ENDPOINT, Some("shared")).unwrap(),
+            "user-key"
+        );
+    }
+
+    #[test]
+    fn resolve_ai_key_shares_deployment_key_only_on_default_endpoint() {
+        // Blank user key + default endpoint -> the shared key is allowed.
+        assert_eq!(
+            resolve_ai_key("", DEFAULT_AI_ENDPOINT, Some("shared")).unwrap(),
+            "shared"
+        );
+        // Blank user key + CUSTOM endpoint -> never leak the shared key.
+        assert!(resolve_ai_key("", "https://custom.example.com/v1", Some("shared")).is_err());
+        // Blank user key + default endpoint but no shared key -> error.
+        assert!(resolve_ai_key("", DEFAULT_AI_ENDPOINT, None).is_err());
+        // An empty shared key is treated as absent.
+        assert!(resolve_ai_key("", DEFAULT_AI_ENDPOINT, Some("")).is_err());
+    }
+
+    #[test]
+    fn is_blocked_ip_blocks_metadata_loopback_and_private() {
+        use std::net::IpAddr;
+        for s in [
+            "169.254.169.254",  // cloud metadata (link-local)
+            "127.0.0.1",        // loopback
+            "10.0.0.5",         // RFC1918
+            "172.16.0.1",       // RFC1918
+            "192.168.1.1",      // RFC1918
+            "0.0.0.0",          // unspecified
+            "100.64.0.1",       // CGNAT
+            "::1",              // v6 loopback
+            "fd00::1",          // v6 unique-local
+            "fe80::1",          // v6 link-local
+            "::ffff:127.0.0.1", // v4-mapped loopback
+        ] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(is_blocked_ip(ip), "{s} must be blocked");
+        }
+    }
+
+    #[test]
+    fn is_blocked_ip_allows_public_addresses() {
+        use std::net::IpAddr;
+        for s in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(!is_blocked_ip(ip), "{s} must be allowed");
+        }
+    }
+
+    #[tokio::test]
+    async fn guard_outbound_url_rejects_metadata_loopback_and_bad_scheme() {
+        // IP literals resolve to themselves, so these are deterministic.
+        assert!(
+            guard_outbound_url("http://169.254.169.254/latest/meta-data")
+                .await
+                .is_err()
+        );
+        assert!(
+            guard_outbound_url("http://127.0.0.1:11434/v1/chat/completions")
+                .await
+                .is_err()
+        );
+        assert!(guard_outbound_url("http://[::1]:8080/v1").await.is_err());
+        // Non-http(s) scheme is refused before any resolution.
+        assert!(guard_outbound_url("ftp://example.com/x").await.is_err());
+        assert!(guard_outbound_url("not a url").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn guard_outbound_url_allows_a_public_host() {
+        // A public DNS name resolving to a routable address passes. Uses a
+        // literal public IP to avoid depending on live DNS in CI.
+        assert!(guard_outbound_url("https://8.8.8.8/v1/chat/completions")
+            .await
+            .is_ok());
     }
 }
