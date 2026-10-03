@@ -48,3 +48,4 @@ crates/mobile/gen/
 # Android signing keys - never commit
 *.keystore
 *.jks
+.worktrees/
