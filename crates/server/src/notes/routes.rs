@@ -432,6 +432,17 @@ async fn delete_note(
         return Err(AppError::Forbidden);
     }
 
+    // Evict any live collab room for this note and set its deletion tombstone
+    // BEFORE touching git/DB, while we hold the per-note lock. `flush_room`
+    // takes the same lock and re-checks the tombstone after acquiring it, so a
+    // debounced flush that is in flight (it holds its own `Arc<Room>`, so
+    // eviction alone can't stop it) bails instead of re-registering the row
+    // (which, via `owner_hint`, would hijack ownership), re-saving the CRDT
+    // blob, or recreating the file we're about to delete.
+    if let Some(room) = state.rooms.evict(&note_id) {
+        room.set_deleted();
+    }
+
     let (author_name, author_email) = crate::db_users::commit_author(&state.db, &user_id)
         .await
         .map_err(AppError::Internal)?;
@@ -596,6 +607,85 @@ mod tests {
         .await
         .unwrap();
         assert!(!on_disk.exists(), "DELETE must remove the bare file itself");
+    }
+
+    /// Regression: deleting a note that is open in a live collab room must not
+    /// be undone by the room's debounced persistence. Before the fix, `delete`
+    /// never evicted the room, so a `flush_room` that ran afterwards (under the
+    /// same per-note lock) would `ensure_note_registered(owner_hint)` —
+    /// re-inserting the `notes` row owned by the FIRST opener (a write-share
+    /// collaborator, NOT the real owner → silent ownership hijack) — re-save
+    /// the CRDT blob, and recreate the file. Now `delete` evicts the room and
+    /// sets its tombstone, and `flush_room` bails after taking the lock.
+    #[tokio::test]
+    async fn delete_note_open_in_room_is_not_resurrected_by_flush() {
+        let (state, notes_dir, _db_dir) = test_state().await;
+
+        // Note owned by alice.
+        let _ = create_note(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            WithRejection(
+                Json(CreateNoteRequest {
+                    id_or_title: "doomed".to_string(),
+                    content: Some("# doomed\nlive body\n".to_string()),
+                }),
+                std::marker::PhantomData,
+            ),
+        )
+        .await
+        .unwrap();
+
+        // Simulate a write-share collaborator (bob) opening the room first, so
+        // the room's `owner_hint` is bob — the vector for the ownership hijack.
+        let room = state.rooms.get_or_create("doomed", "bob", &state).await;
+        room.mark_dirty();
+        assert!(
+            !room.snapshot_text().is_empty(),
+            "room seeds non-empty in-memory text from disk",
+        );
+
+        // Owner alice deletes the note.
+        delete_note(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            Path("doomed".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let on_disk = notes_dir.path().join("doomed.md");
+        assert!(!on_disk.exists(), "DELETE removes the file");
+        assert!(
+            state.rooms.get("doomed").is_none(),
+            "DELETE evicts the live room",
+        );
+
+        // The debounced flush fires AFTER the delete (it still holds its own
+        // Arc<Room>). It must bail on the tombstone.
+        crate::collab::persist::flush_room(&room, &state)
+            .await
+            .unwrap();
+
+        assert!(
+            !on_disk.exists(),
+            "flush must not recreate the deleted note's file",
+        );
+        assert!(
+            !acl::note_exists(&state.db, "doomed").await.unwrap(),
+            "flush must not re-register the notes row",
+        );
+        assert!(
+            !acl::is_owner(&state.db, "doomed", "bob").await.unwrap(),
+            "ownership must not be hijacked to the room's owner_hint",
+        );
+        assert!(
+            acl::load_note_crdt(&state.db, "doomed")
+                .await
+                .unwrap()
+                .is_none(),
+            "flush must not resurrect the CRDT continuity blob",
+        );
     }
 
     /// Simulate an external tool (Obsidian/Syncthing/vimwiki) writing a file

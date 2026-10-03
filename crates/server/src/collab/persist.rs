@@ -129,6 +129,19 @@ pub async fn flush_room(room: &Arc<Room>, state: &AppState) -> anyhow::Result<()
     // Serialize against REST writes/deletes for this note id.
     let _note_guard = state.note_locks.lock(note_id).await;
 
+    // Bail if the note was deleted while this flush was in flight. The REST
+    // delete handler sets this tombstone (and evicts the room) *under this
+    // same per-note lock* before removing the row/file/CRDT. Checking it
+    // *after* acquiring the lock is what closes the race: either we win the
+    // lock and the deleter then observes the deletion-safe state, or the
+    // deleter won and we now see the tombstone. Without this, re-registering
+    // the row (with `owner_hint`, hijacking ownership), re-saving the blob,
+    // and re-committing the still-in-memory text would silently resurrect the
+    // deleted note.
+    if room.is_deleted() {
+        return Ok(());
+    }
+
     // Normally the note already exists (the WS handler rejects opening a
     // note the user can't read, which implies a `notes` row). This is a
     // safety net for the new-note case: ensure the file we're about to
@@ -214,6 +227,7 @@ mod tests {
             broadcast: broadcast_tx,
             connections: AtomicUsize::new(0),
             dirty: AtomicBool::new(true),
+            deleted: AtomicBool::new(false),
             dirty_tx,
             owner_hint: owner.to_string(),
             next_conn_id: AtomicU64::new(1),
