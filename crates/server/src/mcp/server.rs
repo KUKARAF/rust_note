@@ -228,6 +228,7 @@ fn render_new_pipeline_note(kind_str: &str, args: &CreatePipelineArgs) -> String
 
     let mut fm = Frontmatter {
         fields: Vec::new(),
+        raw_extra: Vec::new(),
         body: String::new(),
     };
     fm.set("kind", kind_str);

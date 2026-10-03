@@ -136,6 +136,7 @@ pub fn settings_note_id(user_id: &str) -> String {
 fn default_note_content() -> String {
     let mut fm = Frontmatter {
         fields: Vec::new(),
+        raw_extra: Vec::new(),
         body: "# Settings\n\n\
             This note stores your personal rust_note settings as YAML frontmatter \
             above.\nYou can edit it by hand — just keep the `---` fences and valid \
