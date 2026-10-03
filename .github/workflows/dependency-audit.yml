@@ -1,0 +1,74 @@
+name: Dependency audit
+
+# NON-BLOCKING - scans Rust (cargo) and npm dependencies for known
+# vulnerabilities. Same philosophy as ci-advisory.yml: advisories can appear
+# overnight for code that hasn't changed, so this never fails the job or
+# gates a merge - it's purely a surfaced signal in the Actions run log.
+#
+# Runs on push/PR to main (so new dependency changes are checked immediately)
+# plus a weekly schedule (so advisories published against already-merged,
+# unchanged dependencies are still caught).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1" # Monday 06:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: dependency-audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    name: cargo audit (advisory only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit (prebuilt binary via cargo-binstall)
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall -y cargo-audit
+
+      - name: Run cargo audit (never fails the job)
+        run: cargo audit || true
+
+      - name: Job always succeeds (advisory only)
+        if: always()
+        run: exit 0
+
+  npm-audit:
+    name: npm audit (advisory only)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+
+      - name: Run npm audit (never fails the job)
+        run: npm audit --audit-level=high || true
+
+      - name: Job always succeeds (advisory only)
+        if: always()
+        run: exit 0
