@@ -1,4 +1,4 @@
-//! HTTP handlers for `/api/recurring` (+ the public ASCII endpoint).
+//! HTTP handlers for `/api/recurring` (+ the ASCII-emoji status endpoint).
 
 use axum::extract::{Path, State};
 use axum::http::header;
@@ -12,8 +12,8 @@ use rust_note_core::frontmatter::Frontmatter;
 
 use super::calendar::{calendar_row_active, fetch_calendars};
 use super::{
-    fetch_has_unread, http_client, load_defs, local_done, read_note_text, today_daily_note_id,
-    RecurringKind, RecurringTodo, RecurringTodoStatus, DEFS_NOTE_ID,
+    fetch_has_unread, http_client, is_safe_recurring_url, load_defs, local_done, read_note_text,
+    today_daily_note_id, RecurringKind, RecurringTodo, RecurringTodoStatus, DEFS_NOTE_ID,
 };
 use crate::auth::session::RequireAuth;
 use crate::collab::write::edit_note_through_room;
@@ -25,7 +25,7 @@ use crate::settings::store::{load_or_bootstrap, settings_note_id};
 use crate::state::AppState;
 use crate::stats::{timezone_of, today_in_tz, DEFAULT_TZ};
 
-/// Emoji returned by the public ASCII endpoint when nothing is pending.
+/// Emoji returned by the ASCII-emoji status endpoint when nothing is pending.
 const ALL_DONE_EMOJI: &str = "✅";
 
 pub fn router() -> Router<AppState> {
@@ -131,6 +131,21 @@ async fn put_recurring(
         .map(RecurringTodo::normalized)
         .collect();
 
+    // `Foreign`/`Calendar` rows carry a server-fetched `url`: reject anything
+    // that isn't a well-formed http(s) URL pointing at a public host, so a
+    // stored definition can't be used to make the server probe loopback,
+    // private, link-local, or cloud-metadata addresses (SSRF).
+    for def in &todos {
+        if let Some(url) = def.url.as_deref() {
+            if !is_safe_recurring_url(url) {
+                return Err(AppError::BadRequest(format!(
+                    "invalid or unsafe url for recurring todo `{}`",
+                    def.key
+                )));
+            }
+        }
+    }
+
     let json = serde_json::to_string_pretty(&todos)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("serializing definitions failed: {e}")))?;
 
@@ -207,12 +222,25 @@ async fn set_done(
     Ok(Json(OkResponse { ok: true }))
 }
 
-// ---- GET /api/recurring_ascii_todo (PUBLIC) -------------------------------
+// ---- GET /api/recurring_ascii_todo -----------------------------------------
 
-/// Public: returns a single emoji (`text/plain`) for the highest-priority
-/// pending recurring todo, or `✅` when nothing is pending. No auth: this is
-/// meant to be polled by an external status widget.
-async fn ascii_todo(State(state): State<AppState>) -> impl IntoResponse {
+/// Returns a single emoji (`text/plain`) for the highest-priority pending
+/// recurring todo, or `✅` when nothing is pending.
+///
+/// This used to be unauthenticated ("meant to be polled by an external status
+/// widget"), but recurring definitions are a single *global* note shared by
+/// every user, and computing the emoji makes the server issue live outbound
+/// GETs to every configured `Foreign`/`Calendar` url. A public, unauthenticated
+/// handler that does that is both an activity oracle (the emoji leaks whether
+/// someone's task is pending) and — before the url validation added in
+/// `put_recurring` — a blind SSRF primitive anyone on the internet could poke
+/// at for free. Nothing in this codebase or the web app actually calls this
+/// endpoint without a session, so there's no evidence it needs to stay public;
+/// require auth like every other recurring route.
+async fn ascii_todo(
+    State(state): State<AppState>,
+    RequireAuth(_user_id): RequireAuth,
+) -> impl IntoResponse {
     let emoji = compute_ascii_emoji(&state).await;
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], emoji)
 }
@@ -269,4 +297,101 @@ async fn compute_ascii_emoji(state: &AppState) -> String {
 
     best.map(|(_, emoji)| emoji)
         .unwrap_or_else(|| ALL_DONE_EMOJI.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum_extra::extract::cookie::Key;
+
+    use super::*;
+    use crate::auth::oidc::OidcClient;
+    use crate::config::Config;
+    use crate::notes::repo::NotesRepo;
+
+    async fn test_state() -> (AppState, tempfile::TempDir, tempfile::TempDir) {
+        let notes_dir = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db");
+
+        let notes_repo = NotesRepo::open_or_init(notes_dir.path().to_str().unwrap()).unwrap();
+        let db = crate::db::init_pool(db_path.to_str().unwrap())
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO users (id, email, display_name, created_at) VALUES (?, ?, ?, ?)")
+            .bind("alice")
+            .bind("alice@example.com")
+            .bind("alice")
+            .bind("2026-01-01T00:00:00Z")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let state = AppState {
+            db,
+            notes_repo,
+            config: Arc::new(Config::from_env()),
+            oidc: None::<Arc<OidcClient>>,
+            cookie_key: Key::generate(),
+            note_locks: crate::state::NoteLocks::new(),
+            rooms: crate::collab::room::RoomRegistry::new(),
+        };
+
+        (state, notes_dir, db_dir)
+    }
+
+    fn foreign_todo(key: &str, url: &str) -> RecurringTodo {
+        RecurringTodo {
+            key: key.to_string(),
+            label: key.to_string(),
+            emoji: "🔔".to_string(),
+            order: 0,
+            kind: RecurringKind::Foreign,
+            url: Some(url.to_string()),
+            regex: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn put_rejects_an_ssrf_url() {
+        let (state, _notes_dir, _db_dir) = test_state().await;
+
+        let body = PutRecurringRequest {
+            todos: vec![foreign_todo(
+                "mail",
+                "http://169.254.169.254/latest/meta-data",
+            )],
+        };
+        let err = put_recurring(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            WithRejection(Json(body), std::marker::PhantomData),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+
+        // Nothing should have been written.
+        assert!(load_defs(&state).is_empty());
+    }
+
+    #[tokio::test]
+    async fn put_accepts_a_normal_url() {
+        let (state, _notes_dir, _db_dir) = test_state().await;
+
+        let body = PutRecurringRequest {
+            todos: vec![foreign_todo("mail", "https://mail.example.com/status")],
+        };
+        let resp = put_recurring(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            WithRejection(Json(body), std::marker::PhantomData),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0.todos.len(), 1);
+        assert_eq!(load_defs(&state).len(), 1);
+    }
 }

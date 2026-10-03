@@ -18,6 +18,7 @@
 pub mod calendar;
 pub mod routes;
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -137,6 +138,63 @@ pub(crate) fn local_done(fm: &Frontmatter, key: &str) -> bool {
     fm.get(key) == Some("true")
 }
 
+/// Whether `s` is safe to store as a `Foreign`/`Calendar` recurring-todo
+/// `url`: a well-formed http(s) URL whose host isn't `localhost` and, when
+/// the host is a literal IP, isn't loopback/private/link-local/unique-local
+/// (this covers the cloud-metadata range `169.254.0.0/16` too). Blocks the
+/// obvious SSRF vectors; a plain hostname that merely *resolves* to an
+/// internal address later (DNS rebinding) isn't caught here, but the
+/// outbound client in [`http_client`] disables redirects, which closes the
+/// other common SSRF escalation path.
+pub fn is_safe_recurring_url(s: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(s.trim()) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    // `Url::host_str` keeps the IPv6 literal's brackets (e.g. `[::1]`); strip
+    // them before parsing so literal-IPv6 urls are checked, not waved through
+    // as an "ordinary hostname".
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => is_public_ipv4(ip),
+        Ok(IpAddr::V6(ip)) => is_public_ipv6(ip),
+        // Not an IP literal: an ordinary hostname, allowed.
+        Err(_) => true,
+    }
+}
+
+/// Whether an IPv4 address is routable/public (i.e. not loopback, private,
+/// link-local/metadata, unspecified, broadcast, or documentation-reserved).
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    !(ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_documentation())
+}
+
+/// Whether an IPv6 address is routable/public (i.e. not loopback, unique-local
+/// (`fc00::/7`), unicast link-local (`fe80::/10`), or unspecified; IPv4-mapped
+/// addresses are checked against their embedded IPv4 payload).
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_public_ipv4(v4);
+    }
+    !(ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() || ip.is_unicast_link_local())
+}
+
 /// Build a hardened outbound HTTP client for polling foreign rows: no
 /// redirects (SSRF guard; foreign urls must be direct `https://`) and a bounded
 /// timeout. Mirrors the client in `todos::query`.
@@ -167,4 +225,58 @@ pub(crate) async fn fetch_has_unread(client: &reqwest::Client, url: &str) -> any
     body.get("has_unread")
         .and_then(serde_json::Value::as_bool)
         .ok_or_else(|| anyhow!("{url} response has no boolean `has_unread` field"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_recurring_url;
+
+    #[test]
+    fn rejects_non_http_schemes() {
+        assert!(!is_safe_recurring_url("ftp://example.com"));
+        assert!(!is_safe_recurring_url("file:///etc/passwd"));
+        assert!(!is_safe_recurring_url("not a url"));
+    }
+
+    #[test]
+    fn rejects_localhost_and_loopback() {
+        assert!(!is_safe_recurring_url("http://localhost/x"));
+        assert!(!is_safe_recurring_url("http://LOCALHOST/x"));
+        assert!(!is_safe_recurring_url("http://127.0.0.1/x"));
+        assert!(!is_safe_recurring_url("http://127.5.6.7/x"));
+        assert!(!is_safe_recurring_url("http://[::1]/x"));
+    }
+
+    #[test]
+    fn rejects_cloud_metadata_and_link_local() {
+        assert!(!is_safe_recurring_url(
+            "http://169.254.169.254/latest/meta-data"
+        ));
+        assert!(!is_safe_recurring_url("http://[fe80::1]/x"));
+    }
+
+    #[test]
+    fn rejects_private_ranges() {
+        assert!(!is_safe_recurring_url("http://10.0.0.5/x"));
+        assert!(!is_safe_recurring_url("http://172.16.0.1/x"));
+        assert!(!is_safe_recurring_url("http://172.31.255.255/x"));
+        assert!(!is_safe_recurring_url("http://192.168.1.1/x"));
+        assert!(!is_safe_recurring_url("http://[fd00::1]/x"));
+        assert!(!is_safe_recurring_url("http://[fc00::1]/x"));
+    }
+
+    #[test]
+    fn rejects_ipv4_mapped_private() {
+        assert!(!is_safe_recurring_url("http://[::ffff:127.0.0.1]/x"));
+        assert!(!is_safe_recurring_url("http://[::ffff:192.168.1.1]/x"));
+    }
+
+    #[test]
+    fn allows_ordinary_public_hosts() {
+        assert!(is_safe_recurring_url("https://example.com/feed.ics"));
+        assert!(is_safe_recurring_url(
+            "http://status.example.org:8080/status"
+        ));
+        assert!(is_safe_recurring_url("https://8.8.8.8/x"));
+    }
 }
