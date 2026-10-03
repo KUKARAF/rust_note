@@ -78,6 +78,13 @@ pub struct Room {
     /// Set when the doc has edits not yet flushed to git; cleared by a
     /// successful flush (see [`super::persist::flush_room`]).
     pub dirty: AtomicBool,
+    /// Tombstone set when the note has been deleted while this room was live
+    /// (see [`RoomRegistry::evict`] / the REST delete handler). An in-flight
+    /// debounced flush holds its own `Arc<Room>`, so evicting the room from
+    /// the registry alone cannot stop it; this tombstone, checked under the
+    /// per-note lock, makes that flush bail instead of resurrecting the
+    /// note's row/file/CRDT (see [`super::persist::flush_room`]).
+    pub deleted: AtomicBool,
     /// Nudges the persistence task that there is something to flush.
     pub dirty_tx: mpsc::UnboundedSender<()>,
     /// User to attribute ownership to if the note has no `notes` row yet
@@ -123,6 +130,19 @@ impl Room {
     pub fn broadcast_frame(&self, origin: u64, data: Bytes) {
         // Errors only when there are zero receivers, which is fine.
         let _ = self.broadcast.send(RelayMsg { origin, data });
+    }
+
+    /// Mark this room's note as deleted. A set tombstone makes an in-flight
+    /// debounced flush bail (see [`super::persist::flush_room`]) rather than
+    /// re-registering the `notes` row, re-saving the CRDT blob, or re-writing
+    /// the file after the note has been deleted out from under the room.
+    pub fn set_deleted(&self) {
+        self.deleted.store(true, Ordering::Release);
+    }
+
+    /// Whether this room's note has been deleted (see [`Self::set_deleted`]).
+    pub fn is_deleted(&self) -> bool {
+        self.deleted.load(Ordering::Acquire)
     }
 
     /// Mark the doc dirty and wake the persistence task.
@@ -271,6 +291,26 @@ impl RoomRegistry {
         });
     }
 
+    /// Evict a note's room from the registry, returning it if present.
+    ///
+    /// Used by the REST delete handler: a note being destroyed must not keep
+    /// (or later resurrect) a live room. Unlike [`RoomRegistry::release`]'s
+    /// reaper removal this is **unconditional** — it drops the entry even
+    /// while connections are still attached, because the note is gone. The
+    /// `DashMap::remove` runs under the shard lock, mutually exclusive with
+    /// [`RoomRegistry::get_or_create`]'s counter increment, so it can't race a
+    /// joiner mid-attach. Any WS handler still holding an `Arc<Room>` keeps
+    /// working against a now-unregistered room; its eventual `release` finds
+    /// nothing to `remove_if` and is a harmless no-op, and the per-room
+    /// `connections` counter stays consistent because eviction never touches
+    /// it. Eviction alone does NOT stop an in-flight flush (the persistence
+    /// task holds its own `Arc<Room>` upgraded from a `Weak`); the caller must
+    /// also set the returned room's [`Room::set_deleted`] tombstone, which
+    /// `flush_room` checks under the per-note lock.
+    pub fn evict(&self, note_id: &str) -> Option<Arc<Room>> {
+        self.rooms.remove(note_id).map(|(_, room)| room)
+    }
+
     /// Best-effort flush of every live room. Used by the graceful-shutdown
     /// path so in-flight collab edits reach git before the process exits.
     pub async fn flush_all(&self, state: &AppState) {
@@ -367,6 +407,7 @@ fn build_room(
         broadcast: broadcast_tx,
         connections: AtomicUsize::new(0),
         dirty: AtomicBool::new(false),
+        deleted: AtomicBool::new(false),
         dirty_tx,
         owner_hint: user_id.to_string(),
         next_conn_id: AtomicU64::new(1),
@@ -396,6 +437,7 @@ mod tests {
             broadcast: broadcast_tx,
             connections: AtomicUsize::new(1),
             dirty: AtomicBool::new(false),
+            deleted: AtomicBool::new(false),
             dirty_tx,
             owner_hint: "admin".to_string(),
             next_conn_id: AtomicU64::new(1),

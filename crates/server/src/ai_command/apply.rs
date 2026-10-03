@@ -281,6 +281,7 @@ mod tests {
             broadcast: broadcast_tx,
             connections: AtomicUsize::new(1),
             dirty: AtomicBool::new(false),
+            deleted: AtomicBool::new(false),
             dirty_tx,
             owner_hint: "admin".to_string(),
             next_conn_id: AtomicU64::new(1),
