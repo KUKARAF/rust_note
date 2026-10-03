@@ -16,18 +16,9 @@ export interface PipelineItem {
 	/** RFC3339 or null. */
 	expected_at: string | null;
 	next_action: string | null;
-	source: string | null;
-	url: string | null;
-	contract: string | null;
-	rate_asked: string | null;
-	rate_offered: string | null;
 	contacts: string[];
-	tags: string[];
 	/** 1-5 (5 = highest) or null. */
 	priority: number | null;
-	applied_at: string | null;
-	last_activity_at: string | null;
-	next_interview_at: string | null;
 	closed_reason: string | null;
 	/** Server-derived: expected_at is in the past. */
 	overdue: boolean;

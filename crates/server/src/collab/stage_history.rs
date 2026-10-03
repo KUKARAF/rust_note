@@ -3,8 +3,8 @@
 //! When a `pipeline/` note's `stage` changes between the previously-committed
 //! on-disk content and the just-flushed text, the server appends a
 //! `"<new_stage>@<now_utc_rfc3339>"` entry to the note's append-only
-//! `stage_history` comma-list and bumps `last_activity_at` to now. The parsed
-//! shape of `stage_history` lives in [`rust_note_core::leads`].
+//! `stage_history` comma-list. The parsed shape of `stage_history` lives in
+//! [`rust_note_core::leads`].
 //!
 //! Wiring: [`maybe_stamp`] is the detection hook called from
 //! `collab/persist.rs::flush_room` with the pre-write disk content and the
@@ -14,14 +14,14 @@
 //!
 //! # Loop-safety
 //!
-//! The write-back touches only `stage_history` and `last_activity_at`, never
-//! `stage`. So the flush it triggers sees the same `stage` on both the
-//! previously-committed content and the new text, [`stage_transition`] returns
-//! `None`, and no second stamp is produced. Because "previous stage" is read
-//! from committed disk state (not room memory), a redundant flush of an
-//! already-stamped change is also a no-op. No in-flight guard is needed; a
-//! per-note guard would in fact risk dropping two legitimate back-to-back
-//! transitions, so it is deliberately omitted.
+//! The write-back touches only `stage_history`, never `stage`. So the flush it
+//! triggers sees the same `stage` on both the previously-committed content and
+//! the new text, [`stage_transition`] returns `None`, and no second stamp is
+//! produced. Because "previous stage" is read from committed disk state (not
+//! room memory), a redundant flush of an already-stamped change is also a
+//! no-op. No in-flight guard is needed; a per-note guard would in fact risk
+//! dropping two legitimate back-to-back transitions, so it is deliberately
+//! omitted.
 
 use std::sync::Arc;
 
@@ -60,7 +60,7 @@ pub fn maybe_stamp(room: &Arc<Room>, state: &AppState, previous: &str, current: 
     tokio::spawn(async move {
         let result =
             crate::collab::write::edit_note_through_room(&state, &note_id, &owner_hint, |old| {
-                Some(append_stage_entry(old, &entry, &now))
+                Some(append_stage_entry(old, &entry))
             })
             .await;
         match result {
@@ -95,20 +95,19 @@ fn pipeline_stage(note_id: &str, content: &str) -> Option<String> {
     PipelineItem::from_frontmatter(note_id, &fm)?.stage
 }
 
-/// Append `entry` to the note's `stage_history` comma-list and set
-/// `last_activity_at` to `now`, returning the re-rendered note.
+/// Append `entry` to the note's `stage_history` comma-list, returning the
+/// re-rendered note.
 ///
 /// Existing history (including malformed entries) is preserved verbatim and
 /// simply extended. Crucially this never touches `stage`, which is what makes
 /// the triggered re-flush loop-safe (see the module docs).
-fn append_stage_entry(old: &str, entry: &str, now: &str) -> String {
+fn append_stage_entry(old: &str, entry: &str) -> String {
     let mut fm = Frontmatter::parse(old);
     let history = match fm.get("stage_history").map(str::trim) {
         Some(existing) if !existing.is_empty() => format!("{existing}, {entry}"),
         _ => entry.to_string(),
     };
     fm.set("stage_history", &history);
-    fm.set("last_activity_at", now);
     fm.render()
 }
 
@@ -165,14 +164,13 @@ mod tests {
     }
 
     #[test]
-    fn append_to_empty_history_sets_one_entry_and_bumps_activity() {
+    fn append_to_empty_history_sets_one_entry() {
         let old = "---\nkind: lead\ncompany: Acme\nstage: lead\n---\n# Acme\n";
-        let rendered = append_stage_entry(old, "lead@2026-09-14T09:00:00Z", "2026-09-14T09:00:00Z");
+        let rendered = append_stage_entry(old, "lead@2026-09-14T09:00:00Z");
         let it = item(&rendered);
         assert_eq!(it.stage.as_deref(), Some("lead"));
         assert_eq!(it.stage_history.len(), 1);
         assert_eq!(it.stage_history[0].stage, "lead");
-        assert_eq!(it.last_activity_at.as_deref(), Some("2026-09-14T09:00:00Z"));
         // Body is untouched.
         assert!(rendered.ends_with("# Acme\n"));
     }
@@ -180,11 +178,7 @@ mod tests {
     #[test]
     fn append_extends_existing_history_in_order() {
         let old = "---\nkind: lead\ncompany: Acme\nstage: interview\nstage_history: \"lead@2026-09-14T09:00:00Z\"\n---\n";
-        let rendered = append_stage_entry(
-            old,
-            "interview@2026-09-20T14:00:00Z",
-            "2026-09-20T14:00:00Z",
-        );
+        let rendered = append_stage_entry(old, "interview@2026-09-20T14:00:00Z");
         let it = item(&rendered);
         let stages: Vec<&str> = it.stage_history.iter().map(|e| e.stage.as_str()).collect();
         assert_eq!(stages, vec!["lead", "interview"]);
@@ -193,8 +187,7 @@ mod tests {
     #[test]
     fn append_preserves_malformed_existing_history() {
         let old = "---\nkind: lead\ncompany: Acme\nstage: offer\nstage_history: \"garbage-no-at, lead@2026-09-14T09:00:00Z\"\n---\n";
-        let rendered =
-            append_stage_entry(old, "offer@2026-09-28T10:00:00Z", "2026-09-28T10:00:00Z");
+        let rendered = append_stage_entry(old, "offer@2026-09-28T10:00:00Z");
         // The raw malformed token is retained verbatim in the stored value...
         let fm = Frontmatter::parse(&rendered);
         assert_eq!(
@@ -213,11 +206,7 @@ mod tests {
         // no history yet), then the write-back's output (history added, same
         // stage). A re-flush comparing those two must NOT re-stamp.
         let committed = "---\nkind: lead\ncompany: Acme\nstage: interview\n---\n";
-        let after_stamp = append_stage_entry(
-            committed,
-            "interview@2026-09-20T14:00:00Z",
-            "2026-09-20T14:00:00Z",
-        );
+        let after_stamp = append_stage_entry(committed, "interview@2026-09-20T14:00:00Z");
         assert!(
             stage_transition(NOTE, committed, &after_stamp).is_none(),
             "appending history must not look like a stage change"

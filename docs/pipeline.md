@@ -40,17 +40,8 @@ never error (follow the never-panic style of `read_stats`/`parse_tasks`).
 | `ball` | `ours` \| `theirs` \| `none` | whose court the next move is in; `none` = closed/dormant |
 | `expected_at` | RFC3339 | deadline the ball should move by. ball=ours → our self-SLA (act by); ball=theirs → chase date (nudge after) |
 | `next_action` | string | the concrete thing the ball represents ("send CV", "reply to Paulina") |
-| `source` | string | justjoin / nofluffjobs / referral / inbound / … |
-| `url` | string | posting or contact link |
-| `contract` | string | B2B / UoP / … |
-| `rate_asked` | string | e.g. `200 PLN/h +VAT` |
-| `rate_offered` | string | filled once they quote |
 | `contact` | comma-list | `Name <email> (role)` entries, comma-separated |
-| `tags` | comma-list | `ai, remote, german` |
 | `priority` | integer 1–5 | higher = chase harder; optional |
-| `applied_at` | date | when applied / first contact |
-| `last_activity_at` | RFC3339 or date | last touch on either side |
-| `next_interview_at` | RFC3339 | denormalized next scheduled interview (source of truth stays Google Calendar — we do NOT re-model interviews here) |
 | `closed_reason` | string | only when stage is terminal — "ghosted", "below floor", "accepted elsewhere" |
 
 ### `stage` vocabulary (not enforced by the parser; documented convention)
@@ -62,9 +53,9 @@ never error (follow the never-panic style of `read_stats`/`parse_tasks`).
 ## Body = timeline (the event log)
 
 Below the frontmatter, a human-readable reverse-chronological log. Each MCP
-`log_pipeline_event` call prepends a dated line here and updates `last_activity_at`
-(and optionally `ball` / `expected_at` / `stage`). Git history preserves every past
-state — no events table needed.
+`log_pipeline_event` call prepends a dated line here (and optionally sets
+`ball` / `expected_at` / `stage`). Git history preserves every past state — no
+events table needed.
 
 ```markdown
 ---
@@ -75,13 +66,8 @@ stage: interview
 ball: theirs
 expected_at: 2026-10-08T12:00:00Z
 next_action: await Aakash's reschedule after today's no-show
-source: referral
-contract: UoP
-tags: ai, remote, us-hours
 contact: Paulina Syberska <paulina.syberska@affirm.com> (coordinator)
 priority: 4
-applied_at: 2026-09-16
-last_activity_at: 2026-10-01T14:20:00Z
 ---
 # Affirm — Senior SWE Back-end
 
@@ -106,18 +92,10 @@ pub struct PipelineItem {
     pub ball: Ball,
     pub expected_at: Option<OffsetDateTime>, // parsed RFC3339; unparseable → None
     pub next_action: Option<String>,
-    pub source: Option<String>,
-    pub url: Option<String>,
-    pub contract: Option<String>,
-    pub rate_asked: Option<String>,
-    pub rate_offered: Option<String>,
     pub contacts: Vec<String>,               // split on ',', trimmed, empties dropped
-    pub tags: Vec<String>,                   // split on ',', trimmed, empties dropped
     pub priority: Option<u8>,                // parse 1..=5; out-of-range/non-int → None
-    pub applied_at: Option<String>,
-    pub last_activity_at: Option<String>,
-    pub next_interview_at: Option<OffsetDateTime>,
     pub closed_reason: Option<String>,
+    pub stage_history: Vec<StageEntry>,      // parsed "<stage>@<rfc3339>" comma-list
 }
 ```
 
@@ -153,9 +131,9 @@ through `edit_note_through_room` + `authorize_write`, settings-id block already 
 `_settings/*` not `pipeline/*`):
 
 - `list_pipeline` — args `{ kind?, include_closed? }` → same shape as `GET /api/pipeline`.
-- `create_pipeline_item` — args `{ company, kind, role?, stage?, ball?, expected_at?, next_action?, source?, url?, contract?, rate_asked?, tags?, contact?, priority?, applied_at?, note? }` → slugs an id, writes the frontmatter note (+ optional body).
-- `update_pipeline_item` — args `{ id, <any frontmatter field> }` → sets/merges the given frontmatter keys, leaving others intact (use `Frontmatter::set`), bumps `last_activity_at`.
-- `log_pipeline_event` — args `{ id, line, ball?, expected_at?, stage?, next_action? }` → prepends `- <today> — <line>` under the body `## Timeline`, bumps `last_activity_at`, and applies any of ball/expected_at/stage/next_action supplied.
+- `create_pipeline_item` — args `{ company, kind, role?, stage?, ball?, expected_at?, next_action?, contact?, priority?, note? }` → slugs an id, writes the frontmatter note (+ optional body).
+- `update_pipeline_item` — args `{ id, <any frontmatter field> }` → sets/merges the given frontmatter keys, leaving others intact (use `Frontmatter::set`).
+- `log_pipeline_event` — args `{ id, line, ball?, expected_at?, stage?, next_action? }` → prepends `- <today> — <line>` under the body `## Timeline`, and applies any of ball/expected_at/stage/next_action supplied.
 
 ## Web: `/pipeline` view (in `web/src/routes/pipeline/+page.svelte`)
 
