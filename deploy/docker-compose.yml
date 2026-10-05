@@ -7,6 +7,25 @@ services:
     image: ghcr.io/kukaraf/rust_note:latest
     container_name: rustnote
     restart: unless-stopped
+    # Scale-to-zero via Sablier (infra repo: env/caddy). The Caddy site block
+    # for notes.osmosis.page does `import sleep_blocking notes 1h 1m`, and
+    # Sablier only knows a group once a container carries these labels -
+    # without them every request gets Sablier's 200 application/problem+json
+    # "group notes not found" instead of reaching rust_note. The group name
+    # MUST stay equal to the Caddyfile's.
+    labels:
+      sablier.enable: "true"
+      sablier.group: notes
+    # Sablier's blocking strategy waits for "healthy" when a healthcheck
+    # exists, so woken requests don't race the server's startup (migrations,
+    # git repo open). The runtime image has no curl/wget; bash's /dev/tcp is
+    # enough: GET /health answers "ok".
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ok <&3"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     # Matches the host `rafa` user (uid/gid 1004 on bigboy) so the container
     # can write into the bind-mounted /mnt/raid/vimwiki without needing to
     # chown anything on the host. Update this if deployed under a different
