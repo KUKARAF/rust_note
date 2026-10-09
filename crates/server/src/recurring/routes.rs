@@ -227,19 +227,11 @@ async fn set_done(
 /// Returns a single emoji (`text/plain`) for the highest-priority pending
 /// recurring todo, or `✅` when nothing is pending.
 ///
-/// This used to be unauthenticated ("meant to be polled by an external status
-/// widget"), but recurring definitions are a single *global* note shared by
-/// every user, and computing the emoji makes the server issue live outbound
-/// GETs to every configured `Foreign`/`Calendar` url. A public, unauthenticated
-/// handler that does that is both an activity oracle (the emoji leaks whether
-/// someone's task is pending) and — before the url validation added in
-/// `put_recurring` — a blind SSRF primitive anyone on the internet could poke
-/// at for free. Nothing in this codebase or the web app actually calls this
-/// endpoint without a session, so there's no evidence it needs to stay public;
-/// require auth like every other recurring route.
+/// Meant to be polled by an external status widget, so it is intentionally
+/// unauthenticated. Recurring definitions are a global note and "today" is
+/// resolved in the default timezone.
 async fn ascii_todo(
     State(state): State<AppState>,
-    RequireAuth(_user_id): RequireAuth,
 ) -> impl IntoResponse {
     let emoji = compute_ascii_emoji(&state).await;
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], emoji)
