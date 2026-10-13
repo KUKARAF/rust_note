@@ -12,8 +12,9 @@ use rust_note_core::frontmatter::Frontmatter;
 
 use super::calendar::{calendar_row_active, fetch_calendars};
 use super::{
-    fetch_has_unread, http_client, is_safe_recurring_url, load_defs, local_done, read_note_text,
-    today_daily_note_id, RecurringKind, RecurringTodo, RecurringTodoStatus, DEFS_NOTE_ID,
+    default_number_emojis, fetch_has_unread, http_client, is_safe_recurring_url, load_settings,
+    local_done, read_note_text, today_daily_note_id, RecurringKind, RecurringSettings,
+    RecurringTodo, RecurringTodoStatus, DEFS_NOTE_ID,
 };
 use crate::auth::session::RequireAuth;
 use crate::collab::write::edit_note_through_room;
@@ -57,13 +58,15 @@ async fn settings_tz(state: &AppState, user_id: &str) -> AppResult<String> {
 #[derive(Debug, Serialize)]
 pub(crate) struct RecurringListResponse {
     todos: Vec<RecurringTodoStatus>,
+    number_emojis: i64,
 }
 
 async fn list_recurring(
     State(state): State<AppState>,
     RequireAuth(user_id): RequireAuth,
 ) -> AppResult<Json<RecurringListResponse>> {
-    let defs = load_defs(&state);
+    let settings = load_settings(&state);
+    let defs = settings.todos;
     let tz = settings_tz(&state, &user_id).await?;
     let daily_id = today_daily_note_id(&tz);
     let fm = Frontmatter::parse(&read_note_text(&state, &daily_id));
@@ -110,7 +113,10 @@ async fn list_recurring(
         });
     }
 
-    Ok(Json(RecurringListResponse { todos }))
+    Ok(Json(RecurringListResponse {
+        todos,
+        number_emojis: settings.number_emojis,
+    }))
 }
 
 // ---- PUT /api/recurring ---------------------------------------------------
@@ -118,6 +124,8 @@ async fn list_recurring(
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct PutRecurringRequest {
     todos: Vec<RecurringTodo>,
+    #[serde(default = "default_number_emojis")]
+    number_emojis: i64,
 }
 
 async fn put_recurring(
@@ -125,6 +133,12 @@ async fn put_recurring(
     RequireAuth(user_id): RequireAuth,
     WithRejection(Json(body), _): WithRejection<Json<PutRecurringRequest>, AppError>,
 ) -> AppResult<Json<PutRecurringRequest>> {
+    if body.number_emojis < 1 {
+        return Err(AppError::BadRequest(
+            "number_emojis must be at least 1".to_string(),
+        ));
+    }
+
     let todos: Vec<RecurringTodo> = body
         .todos
         .into_iter()
@@ -146,7 +160,11 @@ async fn put_recurring(
         }
     }
 
-    let json = serde_json::to_string_pretty(&todos)
+    let settings = RecurringSettings {
+        number_emojis: body.number_emojis,
+        todos,
+    };
+    let json = serde_json::to_string_pretty(&settings)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("serializing definitions failed: {e}")))?;
 
     let note_id = DEFS_NOTE_ID;
@@ -174,7 +192,10 @@ async fn put_recurring(
         .await
         .map_err(AppError::Internal)?;
 
-    Ok(Json(PutRecurringRequest { todos }))
+    Ok(Json(PutRecurringRequest {
+        todos: settings.todos,
+        number_emojis: settings.number_emojis,
+    }))
 }
 
 // ---- POST /api/recurring/{key}/done ---------------------------------------
@@ -224,8 +245,9 @@ async fn set_done(
 
 // ---- GET /api/recurring_ascii_todo -----------------------------------------
 
-/// Returns a single emoji (`text/plain`) for the highest-priority pending
-/// recurring todo, or `✅` when nothing is pending.
+/// Returns up to `number_emojis` emojis (`text/plain`, concatenated with no
+/// separator), one per pending recurring todo in priority order, or `✅`
+/// when nothing is pending.
 ///
 /// Meant to be polled by an external status widget, so it is intentionally
 /// unauthenticated. Recurring definitions are a global note and "today" is
@@ -238,7 +260,8 @@ async fn ascii_todo(
 }
 
 async fn compute_ascii_emoji(state: &AppState) -> String {
-    let defs = load_defs(state);
+    let settings = load_settings(state);
+    let defs = settings.todos;
     // No per-user context on the public endpoint: resolve "today" in the
     // default timezone and read the (global) daily note directly.
     let daily_id = today_daily_note_id(DEFAULT_TZ);
@@ -260,11 +283,12 @@ async fn compute_ascii_emoji(state: &AppState) -> String {
         .filter_map(|d| d.url.clone());
     let calendars = fetch_calendars(&client, calendar_urls, today_in_tz(DEFAULT_TZ)).await;
 
-    // Track the pending todo with the smallest order (0 = highest priority);
-    // ties resolve to the earlier array position (first seen wins).
-    let mut best: Option<(i64, String)> = None;
+    // Collect every pending todo's (order, emoji); `sort_by_key` is stable,
+    // so ties keep their original array position (first seen wins), same as
+    // before this collected more than just the single best one.
+    let mut pending: Vec<(i64, String)> = Vec::new();
     for def in &defs {
-        let pending = match def.kind {
+        let is_pending = match def.kind {
             RecurringKind::Local => !local_done(&fm, &def.key),
             RecurringKind::Foreign => match def.url.as_deref() {
                 Some(url) => match fetch_has_unread(&client, url).await {
@@ -282,13 +306,21 @@ async fn compute_ascii_emoji(state: &AppState) -> String {
                 calendar_row_active(&calendars, def.url.as_deref(), def.regex.as_deref())
             }
         };
-        if pending && best.as_ref().is_none_or(|(o, _)| def.order < *o) {
-            best = Some((def.order, def.emoji.clone()));
+        if is_pending {
+            pending.push((def.order, def.emoji.clone()));
         }
     }
 
-    best.map(|(_, emoji)| emoji)
-        .unwrap_or_else(|| ALL_DONE_EMOJI.to_string())
+    if pending.is_empty() {
+        return ALL_DONE_EMOJI.to_string();
+    }
+    pending.sort_by_key(|(order, _)| *order);
+    let take = settings.number_emojis.max(1) as usize;
+    pending
+        .into_iter()
+        .take(take)
+        .map(|(_, emoji)| emoji)
+        .collect()
 }
 
 #[cfg(test)]
@@ -346,6 +378,18 @@ mod tests {
         }
     }
 
+    fn local_todo(key: &str, emoji: &str, order: i64) -> RecurringTodo {
+        RecurringTodo {
+            key: key.to_string(),
+            label: key.to_string(),
+            emoji: emoji.to_string(),
+            order,
+            kind: RecurringKind::Local,
+            url: None,
+            regex: None,
+        }
+    }
+
     #[tokio::test]
     async fn put_rejects_an_ssrf_url() {
         let (state, _notes_dir, _db_dir) = test_state().await;
@@ -355,6 +399,7 @@ mod tests {
                 "mail",
                 "http://169.254.169.254/latest/meta-data",
             )],
+            number_emojis: 1,
         };
         let err = put_recurring(
             State(state.clone()),
@@ -366,7 +411,7 @@ mod tests {
         assert!(matches!(err, AppError::BadRequest(_)));
 
         // Nothing should have been written.
-        assert!(load_defs(&state).is_empty());
+        assert!(load_settings(&state).todos.is_empty());
     }
 
     #[tokio::test]
@@ -375,6 +420,7 @@ mod tests {
 
         let body = PutRecurringRequest {
             todos: vec![foreign_todo("mail", "https://mail.example.com/status")],
+            number_emojis: 1,
         };
         let resp = put_recurring(
             State(state.clone()),
@@ -384,6 +430,87 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(resp.0.todos.len(), 1);
-        assert_eq!(load_defs(&state).len(), 1);
+        assert_eq!(load_settings(&state).todos.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ascii_todo_returns_up_to_number_emojis_pending_items_in_order() {
+        let (state, _notes_dir, _db_dir) = test_state().await;
+
+        let body = PutRecurringRequest {
+            todos: vec![
+                local_todo("stretches", "🧘", 2),
+                local_todo("mail", "🔔", 0),
+                local_todo("standup", "📅", 1),
+            ],
+            number_emojis: 2,
+        };
+        put_recurring(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            WithRejection(Json(body), std::marker::PhantomData),
+        )
+        .await
+        .unwrap();
+
+        // None of the three are marked done, so all are pending; only the top
+        // 2 by `order` (mail=0, standup=1) should show, in that order.
+        assert_eq!(compute_ascii_emoji(&state).await, "🔔📅");
+    }
+
+    #[tokio::test]
+    async fn ascii_todo_caps_at_the_number_of_actually_pending_items() {
+        let (state, _notes_dir, _db_dir) = test_state().await;
+
+        let body = PutRecurringRequest {
+            todos: vec![local_todo("mail", "🔔", 0)],
+            number_emojis: 5,
+        };
+        put_recurring(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            WithRejection(Json(body), std::marker::PhantomData),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(compute_ascii_emoji(&state).await, "🔔");
+    }
+
+    #[tokio::test]
+    async fn ascii_todo_all_done_still_shows_checkmark_regardless_of_number_emojis() {
+        let (state, _notes_dir, _db_dir) = test_state().await;
+
+        let body = PutRecurringRequest {
+            todos: vec![],
+            number_emojis: 3,
+        };
+        put_recurring(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            WithRejection(Json(body), std::marker::PhantomData),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(compute_ascii_emoji(&state).await, ALL_DONE_EMOJI);
+    }
+
+    #[tokio::test]
+    async fn put_rejects_number_emojis_below_one() {
+        let (state, _notes_dir, _db_dir) = test_state().await;
+
+        let body = PutRecurringRequest {
+            todos: vec![],
+            number_emojis: 0,
+        };
+        let err = put_recurring(
+            State(state.clone()),
+            RequireAuth("alice".to_string()),
+            WithRejection(Json(body), std::marker::PhantomData),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
     }
 }

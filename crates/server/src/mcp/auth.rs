@@ -1,20 +1,8 @@
-//! MCP OAuth 2.1 Resource Server: token validation + OAuth metadata.
-//!
-//! rust_note does not issue tokens — Authentik (the app's OIDC provider) is the
-//! Authorization Server. This module makes rust_note a compliant Resource
-//! Server for the `/mcp` endpoint:
-//!
-//!   * serves RFC 9728 Protected Resource Metadata so a client discovers the
-//!     Authorization Server,
-//!   * challenges unauthenticated calls with `WWW-Authenticate: Bearer
-//!     resource_metadata="…"`,
-//!   * validates the presented JWT access token — signature via the issuer's
-//!     JWKS, plus `iss`, `exp`, and (critically) `aud` == our resource URI,
-//!     which prevents a confused-deputy replay of a token minted for another
-//!     resource, and
-//!   * maps the token `sub` to the app `user_id` (the same value the OIDC login
-//!     stores; see [`crate::auth::session`]), injecting it into the request
-//!     extensions for the MCP handlers to read.
+//! MCP OAuth 2.1 Resource Server check: validates the bearer tokens issued
+//! by [`super::oauth`] (rust_note's own, self-contained Authorization
+//! Server for `/mcp` - see that module's doc comment for why it exists
+//! instead of delegating to Authentik) and serves RFC 9728 Protected
+//! Resource Metadata pointing clients at it.
 
 use std::sync::Arc;
 
@@ -23,12 +11,9 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use jsonwebtoken::jwk::JwkSet;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::RwLock;
 
+use super::oauth::store;
 use crate::auth::device_token::bearer_from_headers;
 use crate::config::Config;
 
@@ -38,44 +23,34 @@ use crate::config::Config;
 #[derive(Clone, Debug)]
 pub struct AuthUser(pub String);
 
-/// The access-token claims we consume. `aud`/`iss`/`exp` are validated by
-/// `jsonwebtoken` from the raw token, so only `sub` needs deserializing here.
-#[derive(Debug, Deserialize)]
-struct Claims {
-    sub: String,
-}
-
-/// MCP Resource-Server auth context: issuer/resource/audience config plus a
-/// lazily-populated, rotation-aware JWKS cache.
+/// MCP Resource-Server auth context: just enough to validate a bearer token
+/// against the DB and to serve the PRM document.
 pub struct McpAuth {
     dev_mode: bool,
-    /// Issuer (Authentik): the JWT `iss` check, the PRM `authorization_servers`
-    /// entry, and the base for OIDC discovery of the JWKS URI.
-    issuer: String,
-    /// The RFC 9728 `resource` value.
+    db: sqlx::SqlitePool,
+    /// The RFC 9728 `resource` value (purely an identifier now - nothing
+    /// validates a token `aud` against it, since there's no JWT).
     resource_uri: String,
-    /// Expected token `aud`.
-    audience: String,
+    /// rust_note's own base URL - the RFC 9728 `authorization_servers`
+    /// entry. rust_note is its own Authorization Server for `/mcp`, so this
+    /// is just `config.base_url`, unconditionally.
+    base_url: String,
     /// Absolute URL of the PRM document (for the `WWW-Authenticate` challenge).
     prm_url: String,
-    http: reqwest::Client,
-    jwks: RwLock<Option<JwkSet>>,
 }
 
 impl McpAuth {
-    pub fn from_config(config: &Config) -> Arc<Self> {
+    pub fn from_config(config: &Config, db: sqlx::SqlitePool) -> Arc<Self> {
         let prm_url = format!(
             "{}/.well-known/oauth-protected-resource",
             config.base_url.trim_end_matches('/')
         );
         Arc::new(Self {
             dev_mode: config.dev_mode,
-            issuer: config.authentik_issuer_url.clone(),
+            db,
             resource_uri: config.mcp_resource_uri.clone(),
-            audience: config.mcp_audience.clone(),
+            base_url: config.base_url.trim_end_matches('/').to_string(),
             prm_url,
-            http: reqwest::Client::new(),
-            jwks: RwLock::new(None),
         })
     }
 
@@ -83,7 +58,7 @@ impl McpAuth {
     pub fn protected_resource_metadata(&self) -> Json<serde_json::Value> {
         Json(json!({
             "resource": self.resource_uri,
-            "authorization_servers": [self.issuer],
+            "authorization_servers": [self.base_url],
             "bearer_methods_supported": ["header"],
         }))
     }
@@ -118,110 +93,17 @@ impl McpAuth {
         let Some(token) = bearer_from_headers(req.headers()) else {
             return self.challenge();
         };
-        match self.validate(&token).await {
-            Ok(user_id) => {
+        match store::resolve_access_token(&self.db, &token).await {
+            Ok(Some(user_id)) => {
                 req.extensions_mut().insert(AuthUser(user_id));
                 next.run(req).await
             }
+            Ok(None) => self.challenge(),
             Err(err) => {
-                tracing::debug!(error = %err, "MCP token validation failed");
+                tracing::error!(error = %err, "mcp token validation: DB error");
                 self.challenge()
             }
         }
-    }
-
-    /// Validate a bearer JWT and return its subject (the app `user_id`).
-    async fn validate(&self, token: &str) -> anyhow::Result<String> {
-        let header = decode_header(token)?;
-        // Reject symmetric algs (alg-confusion defence): our keys are asymmetric
-        // JWKS entries and must never be verified as an HMAC secret.
-        if matches!(
-            header.alg,
-            Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512
-        ) {
-            anyhow::bail!("unsupported token algorithm {:?}", header.alg);
-        }
-        let kid = header
-            .kid
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("token header missing kid"))?;
-
-        let key = self.decoding_key_for(kid).await?;
-        self.decode_claims(token, &key, header.alg)
-    }
-
-    /// Decode + validate a token's claims against this server's issuer and
-    /// audience (and expiry), returning the subject. Split out from [`validate`]
-    /// so the security-critical `iss`/`aud`/`exp` checks are unit-testable
-    /// without a live JWKS. Rejecting a token whose `aud` isn't our resource URI
-    /// is the confused-deputy defence.
-    fn decode_claims(
-        &self,
-        token: &str,
-        key: &DecodingKey,
-        alg: Algorithm,
-    ) -> anyhow::Result<String> {
-        let mut validation = Validation::new(alg);
-        validation.set_issuer(&[self.issuer.as_str()]);
-        validation.set_audience(&[self.audience.as_str()]);
-        validation.validate_exp = true;
-
-        let data = decode::<Claims>(token, key, &validation)?;
-        Ok(data.claims.sub)
-    }
-
-    /// Resolve the decoding key for `kid`, fetching/refreshing the JWKS if it
-    /// isn't cached (covers first use and issuer key rotation).
-    async fn decoding_key_for(&self, kid: &str) -> anyhow::Result<DecodingKey> {
-        if let Some(key) = self.cached_key(kid).await? {
-            return Ok(key);
-        }
-        self.refresh_jwks().await?;
-        self.cached_key(kid)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("no JWKS key for kid {kid}"))
-    }
-
-    async fn cached_key(&self, kid: &str) -> anyhow::Result<Option<DecodingKey>> {
-        let guard = self.jwks.read().await;
-        match guard.as_ref().and_then(|set| set.find(kid)) {
-            Some(jwk) => Ok(Some(DecodingKey::from_jwk(jwk)?)),
-            None => Ok(None),
-        }
-    }
-
-    async fn refresh_jwks(&self) -> anyhow::Result<()> {
-        let jwks_uri = self.discover_jwks_uri().await?;
-        let set: JwkSet = self
-            .http
-            .get(jwks_uri)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        *self.jwks.write().await = Some(set);
-        Ok(())
-    }
-
-    /// OIDC discovery against the issuer to find its `jwks_uri`.
-    async fn discover_jwks_uri(&self) -> anyhow::Result<String> {
-        let url = format!(
-            "{}/.well-known/openid-configuration",
-            self.issuer.trim_end_matches('/')
-        );
-        let doc: serde_json::Value = self
-            .http
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        doc.get("jwks_uri")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| anyhow::anyhow!("issuer discovery document has no jwks_uri"))
     }
 }
 
@@ -229,83 +111,40 @@ impl McpAuth {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use jsonwebtoken::{encode, EncodingKey, Header};
 
-    const ISS: &str = "https://issuer.example/";
-    const AUD: &str = "https://notes.example.com/mcp";
-    const SECRET: &[u8] = b"test-secret-for-hs256-claims-checks";
-    // Far-future / far-past unix timestamps so the tests never depend on the
-    // clock (only that exp validation compares against "now").
-    const FUTURE: i64 = 4_102_444_800; // 2100-01-01
-    const PAST: i64 = 1_000_000_000; // 2001-09-09
+    async fn test_pool() -> (tempfile::TempDir, sqlx::SqlitePool) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let pool = crate::db::init_pool(db_path.to_str().unwrap())
+            .await
+            .unwrap();
+        (dir, pool)
+    }
 
-    fn test_auth() -> Arc<McpAuth> {
+    fn test_auth(db: sqlx::SqlitePool) -> Arc<McpAuth> {
         let mut cfg = Config::from_env();
-        cfg.authentik_issuer_url = ISS.to_string();
         cfg.base_url = "https://notes.example.com".to_string();
-        cfg.mcp_resource_uri = AUD.to_string();
-        cfg.mcp_audience = AUD.to_string();
-        McpAuth::from_config(&cfg)
+        cfg.mcp_resource_uri = "https://notes.example.com/mcp".to_string();
+        McpAuth::from_config(&cfg, db)
     }
 
-    fn make_token(iss: &str, aud: &str, exp: i64) -> String {
-        let claims = json!({ "sub": "alice", "iss": iss, "aud": aud, "exp": exp });
-        encode(
-            &Header::new(Algorithm::HS256),
-            &claims,
-            &EncodingKey::from_secret(SECRET),
-        )
-        .expect("sign test token")
-    }
-
-    fn key() -> DecodingKey {
-        DecodingKey::from_secret(SECRET)
-    }
-
-    #[test]
-    fn accepts_token_with_matching_iss_and_aud() {
-        let auth = test_auth();
-        let token = make_token(ISS, AUD, FUTURE);
-        let sub = auth
-            .decode_claims(&token, &key(), Algorithm::HS256)
-            .expect("valid token accepted");
-        assert_eq!(sub, "alice");
-    }
-
-    #[test]
-    fn rejects_wrong_audience() {
-        // Confused-deputy defence: a token minted for another resource is refused.
-        let auth = test_auth();
-        let token = make_token(ISS, "https://evil.example/api", FUTURE);
-        assert!(auth
-            .decode_claims(&token, &key(), Algorithm::HS256)
-            .is_err());
-    }
-
-    #[test]
-    fn rejects_wrong_issuer() {
-        let auth = test_auth();
-        let token = make_token("https://evil.example/", AUD, FUTURE);
-        assert!(auth
-            .decode_claims(&token, &key(), Algorithm::HS256)
-            .is_err());
-    }
-
-    #[test]
-    fn rejects_expired() {
-        let auth = test_auth();
-        let token = make_token(ISS, AUD, PAST);
-        assert!(auth
-            .decode_claims(&token, &key(), Algorithm::HS256)
-            .is_err());
-    }
-
-    #[test]
-    fn prm_advertises_resource_and_issuer() {
-        let auth = test_auth();
+    #[tokio::test]
+    async fn prm_advertises_resource_and_self_as_authorization_server() {
+        let (_dir, db) = test_pool().await;
+        let auth = test_auth(db);
         let Json(doc) = auth.protected_resource_metadata();
-        assert_eq!(doc["resource"], AUD);
-        assert_eq!(doc["authorization_servers"][0], ISS);
+        assert_eq!(doc["resource"], "https://notes.example.com/mcp");
+        assert_eq!(doc["authorization_servers"][0], "https://notes.example.com");
         assert_eq!(doc["bearer_methods_supported"][0], "header");
+    }
+
+    #[tokio::test]
+    async fn unknown_bearer_token_is_rejected() {
+        let (_dir, db) = test_pool().await;
+        let resolved = store::resolve_access_token(&db, "not-a-real-token")
+            .await
+            .unwrap();
+        assert!(resolved.is_none());
+        let _ = test_auth(db); // exercises construction with this pool too
     }
 }

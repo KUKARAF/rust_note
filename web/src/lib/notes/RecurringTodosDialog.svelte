@@ -5,8 +5,8 @@
 	// `order` that decides which emoji the public endpoint surfaces first.
 	//
 	// Backend contract (crates/server, same origin):
-	//   GET  /api/recurring            -> { todos: RecurringTodo[] }  (incl. live `done`)
-	//   PUT  /api/recurring            { todos: [...] (no done) } -> { todos: [...] }
+	//   GET  /api/recurring            -> { todos: RecurringTodo[], number_emojis: number }  (incl. live `done`)
+	//   PUT  /api/recurring            { todos: [...] (no done), number_emojis } -> { todos: [...], number_emojis }
 	//   POST /api/recurring/{key}/done { done: boolean }          -> { ok: true }
 	import { apiGet, apiPut, apiPost, ApiError } from '$lib/api/client';
 	import Card from '$lib/design/Card.svelte';
@@ -32,6 +32,7 @@
 	} = $props();
 
 	let todos = $state<RecurringTodo[]>([]);
+	let numberEmojis = $state(1);
 	let loadState = $state<'loading' | 'ok' | 'error'>('loading');
 	let error = $state<string | null>(null);
 	let saving = $state(false);
@@ -41,8 +42,11 @@
 		loadState = 'loading';
 		error = null;
 		try {
-			const res = await apiGet<{ todos: RecurringTodo[] }>('/api/recurring');
+			const res = await apiGet<{ todos: RecurringTodo[]; number_emojis: number }>(
+				'/api/recurring'
+			);
 			todos = res.todos ?? [];
+			numberEmojis = res.number_emojis ?? 1;
 			loadState = 'ok';
 		} catch (err) {
 			loadState = 'error';
@@ -109,7 +113,14 @@
 	}
 
 	/** Assign keys, drop `done`, validate uniqueness/non-emptiness. */
-	function prepareForSave(): { todos: Omit<RecurringTodo, 'done'>[] } | null {
+	function prepareForSave(): {
+		todos: Omit<RecurringTodo, 'done'>[];
+		number_emojis: number;
+	} | null {
+		if (!Number.isInteger(numberEmojis) || numberEmojis < 1) {
+			error = 'Number of emojis must be a whole number of at least 1.';
+			return null;
+		}
 		const seen = new Set<string>();
 		const out: Omit<RecurringTodo, 'done'>[] = [];
 		for (const row of todos) {
@@ -138,7 +149,7 @@
 				regex: row.kind === 'calendar' ? (row.regex?.trim() ?? '') : null
 			});
 		}
-		return { todos: out };
+		return { todos: out, number_emojis: numberEmojis };
 	}
 
 	async function save() {
@@ -148,8 +159,12 @@
 		if (payload === null) return;
 		saving = true;
 		try {
-			const res = await apiPut<{ todos: RecurringTodo[] }>('/api/recurring', payload);
+			const res = await apiPut<{ todos: RecurringTodo[]; number_emojis: number }>(
+				'/api/recurring',
+				payload
+			);
 			todos = res.todos ?? [];
+			numberEmojis = res.number_emojis ?? 1;
 			saved = true;
 		} catch (err) {
 			error = err instanceof ApiError ? err.message : 'Failed to save recurring todos.';
@@ -181,6 +196,21 @@
 				</div>
 
 				<p class="rt-caption">0 = top priority; higher = lower priority. Smallest order among pending wins.</p>
+
+				{#if loadState === 'ok'}
+					<label class="rt-emoji-count">
+						<span>Emojis shown</span>
+						<input
+							type="number"
+							min="1"
+							step="1"
+							class="rt-emoji-count-input"
+							bind:value={numberEmojis}
+							oninput={() => (saved = false)}
+						/>
+						<span class="rt-hint">how many pending items' emojis the status endpoint shows at once</span>
+					</label>
+				{/if}
 
 				{#if loadState === 'loading'}
 					<p class="rt-hint">loading…</p>
@@ -414,6 +444,32 @@
 		font-family: var(--font-term);
 		font-size: var(--type-meta);
 		color: var(--kv-danger);
+	}
+
+	.rt-emoji-count {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		font-family: var(--font-term);
+		font-size: var(--type-meta);
+		color: var(--kv-dim);
+	}
+
+	.rt-emoji-count-input {
+		width: 3.5rem;
+		flex: 0 0 auto;
+		background: var(--surface-input);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-control);
+		padding: 5px 7px;
+		font-family: var(--font-term);
+		font-size: var(--type-body);
+		color: var(--kv-ink);
+	}
+
+	.rt-emoji-count-input:focus {
+		outline: none;
+		border-color: var(--kv-accent);
 	}
 
 	.rt-list {

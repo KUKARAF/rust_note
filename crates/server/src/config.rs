@@ -57,17 +57,14 @@ pub struct Config {
     /// used as a fallback for the natural-language todo query when a user
     /// hasn't set their own key in Settings. `None` when unset/empty.
     pub openrouter_api_key: Option<String>,
-    /// Canonical resource identifier for the MCP server — both the RFC 9728
-    /// Protected Resource Metadata `resource` value and the RFC 8707 audience
-    /// that MCP access tokens must be minted for. Defaults to `{base_url}/mcp`;
+    /// Canonical resource identifier for the MCP server - the RFC 9728
+    /// Protected Resource Metadata `resource` value. Purely an identifier;
+    /// nothing validates a token `aud` against it (rust_note is its own
+    /// Authorization Server for `/mcp` - see `crate::mcp::oauth` - and its
+    /// self-issued tokens are opaque, not JWTs). Defaults to `{base_url}/mcp`;
     /// override with `RUSTNOTE_MCP_RESOURCE_URI` if the deployment reaches the
     /// MCP endpoint under a different public URL than `base_url`.
     pub mcp_resource_uri: String,
-    /// The `aud` claim MCP access tokens must carry to be accepted (confused-
-    /// deputy prevention — a token minted for any other resource is rejected).
-    /// Defaults to [`Self::mcp_resource_uri`]; override with
-    /// `RUSTNOTE_MCP_AUDIENCE` only if Authentik stamps a different audience.
-    pub mcp_audience: String,
 }
 
 /// User id used for every request when [`Config::dev_mode`] is enabled.
@@ -104,13 +101,11 @@ impl Config {
     pub fn from_env() -> Self {
         let base_url =
             std::env::var("RUSTNOTE_BASE_URL").unwrap_or_else(|_| DEV_DEFAULT_BASE_URL.to_string());
-        // The MCP endpoint's canonical URL, used as both the OAuth resource id
-        // and the expected token audience. Trim a trailing slash so we don't
-        // emit `.../mcp` off a `https://host/` base as `https://host//mcp`.
+        // The MCP endpoint's canonical URL, used as the OAuth resource id.
+        // Trim a trailing slash so we don't emit `.../mcp` off a
+        // `https://host/` base as `https://host//mcp`.
         let mcp_resource_uri = std::env::var("RUSTNOTE_MCP_RESOURCE_URI")
             .unwrap_or_else(|_| format!("{}/mcp", base_url.trim_end_matches('/')));
-        let mcp_audience =
-            std::env::var("RUSTNOTE_MCP_AUDIENCE").unwrap_or_else(|_| mcp_resource_uri.clone());
         Self {
             authentik_issuer_url: std::env::var("RUSTNOTE_AUTHENTIK_ISSUER_URL")
                 .unwrap_or_else(|_| "http://localhost:9000/application/o/rust-note/".to_string()),
@@ -179,7 +174,6 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty()),
             mcp_resource_uri,
-            mcp_audience,
         }
     }
 
