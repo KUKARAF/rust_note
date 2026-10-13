@@ -4,26 +4,48 @@
 //! litellm) over the MCP **Streamable HTTP** transport, mounted at `/mcp` as a
 //! Tower service on the main axum router (see [`crate::routes::build`]).
 //!
-//! Auth: rust_note acts as an OAuth 2.1 **Resource Server**. Authentik (the
-//! app's existing OIDC provider) is the Authorization Server and issues the
-//! access tokens; this server only validates them (see [`auth`]) and maps the
-//! token subject to the same `user_id` the REST `RequireAuth` extractor yields,
-//! so every tool enforces identical per-user ACLs.
+//! Auth: rust_note is its own, self-contained OAuth 2.1 Authorization Server
+//! for `/mcp` (see [`oauth`]) - it does **not** delegate to Authentik here.
+//! Authentik has no support for OAuth Dynamic Client Registration (RFC
+//! 7591), so every new MCP client (Claude Code, LiteLLM, claude.ai, ...)
+//! would otherwise need a human to hand-create an OAuth client in
+//! Authentik's admin UI before it could log in. Instead, [`oauth`] lets any
+//! client register itself on the fly, entirely within rust_note's own
+//! database - Authentik's configuration is never read, written, or
+//! depended on by any of this. [`auth`] is the Resource-Server side that
+//! validates the tokens [`oauth`] issues and maps them to the same
+//! `user_id` the REST `RequireAuth` extractor yields, so every tool
+//! enforces identical per-user ACLs.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use axum::extract::DefaultBodyLimit;
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::Router;
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
+use tower_http::timeout::TimeoutLayer;
 
 use crate::state::AppState;
 
 mod auth;
+mod oauth;
 mod server;
 
 use server::McpServer;
+
+/// Body-size/timeout bounds for the DCR surface (`/mcp/register`,
+/// `/mcp/authorize`, `/mcp/authorize/decision`, `/mcp/token`): one-shot
+/// JSON/form requests that make at most one bounded DB round trip, not the
+/// long-lived stream `/mcp` itself is deliberately mounted outside the REST
+/// middleware stack for. Small and short rather than either the REST
+/// stack's 4 MiB/30s (too generous for this payload shape) or no bound at
+/// all (today's gap before this module existed).
+const DCR_MAX_BODY_BYTES: usize = 16 * 1024;
+const DCR_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Build the MCP Streamable-HTTP Tower service.
 ///
@@ -69,12 +91,14 @@ fn allowed_hosts(base_url: &str) -> Vec<String> {
     hosts
 }
 
-/// Mount the MCP endpoint (`/mcp`, auth-gated) and its unauthenticated OAuth
-/// Protected Resource Metadata (`/.well-known/oauth-protected-resource`) onto
-/// the application router.
+/// Mount the MCP endpoint (`/mcp`, auth-gated), its unauthenticated OAuth
+/// Protected Resource Metadata (`/.well-known/oauth-protected-resource`),
+/// and the self-contained OAuth Authorization Server surface (RFC 7591
+/// registration, the authorize/consent flow, the token endpoint, and RFC
+/// 8414 AS metadata - see [`oauth`]) onto the application router.
 pub fn mount(app: Router, state: AppState) -> Router {
     let mcp_service = service(state.clone());
-    let mcp_auth = auth::McpAuth::from_config(&state.config);
+    let mcp_auth = auth::McpAuth::from_config(&state.config, state.db.clone());
 
     // The MCP endpoint, wrapped in the Resource-Server auth middleware.
     let auth_for_mw = mcp_auth.clone();
@@ -95,7 +119,19 @@ pub fn mount(app: Router, state: AppState) -> Router {
         }),
     );
 
-    app.merge(mcp).merge(well_known)
+    // The DCR/authorize/token surface is unauthenticated at the HTTP layer
+    // by design (a client has no token yet when registering/authorizing/
+    // exchanging a code) - see `oauth::routes` module doc. Never nest this
+    // inside `mcp`'s auth-wrapped router above.
+    let dcr = oauth::routes::router()
+        .layer(DefaultBodyLimit::max(DCR_MAX_BODY_BYTES))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            DCR_TIMEOUT,
+        ))
+        .with_state(state);
+
+    app.merge(mcp).merge(well_known).merge(dcr)
 }
 
 #[cfg(test)]

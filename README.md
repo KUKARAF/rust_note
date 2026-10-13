@@ -39,28 +39,37 @@ To produce the app-flavored frontend bundle (used by the Android build):
 
 ## Authentik OIDC setup
 
-1. In Authentik, create an **OAuth2/OpenID Provider** with client type
-   **Public** (PKCE only — no client secret).
-2. Set the provider's **Authorized Redirect URI** to exactly:
+The web/Android login is OIDC against [Authentik]. See
+[`authentik_setup.md`](authentik_setup.md) for the one-time provider
+configuration (redirect URI, scopes, env vars) — it's the **only** part of
+rust_note that needs any Authentik-side setup.
 
-   ```
-   {RUSTNOTE_BASE_URL}/auth/callback
-   ```
+[Authentik]: https://goauthentik.io/
 
-   e.g. for production: `https://notes.osmosis.page/auth/callback`. This must
-   match `RUSTNOTE_OIDC_REDIRECT_URI` byte-for-byte (dev default:
-   `http://localhost:8080/auth/callback`).
-3. Scopes: `openid`, `profile`, `email`.
-4. Copy the provider's **issuer URL** into `RUSTNOTE_AUTHENTIK_ISSUER_URL`
-   and the **client ID** into `RUSTNOTE_OIDC_CLIENT_ID`. Leave
-   `RUSTNOTE_OIDC_CLIENT_SECRET` unset for a Public client.
+### MCP access (Claude Code, LiteLLM, claude.ai, ...)
 
-> **Android app note:** the app does **not** need its own redirect URI
-> registered in Authentik. The app opens the same server login
-> (`/auth/login?client=app`); after the server's `/auth/callback` completes
-> the OIDC exchange, the server hands a device token back to the app via a
-> redirect to `http://tauri.localhost/#token=…` — that handoff happens after
-> the OIDC flow has already ended and never reaches Authentik.
+`/mcp` is **not** backed by Authentik at all. rust_note is its own,
+self-contained OAuth 2.1 Authorization Server for this one endpoint (see
+`crates/server/src/mcp/oauth`), specifically so that connecting a new MCP
+client never needs a human to hand-create anything in Authentik first —
+every client registers itself on the fly (RFC 7591 Dynamic Client
+Registration), which Authentik itself doesn't support.
+
+Connecting a client is just:
+
+```
+claude mcp add --transport http notes https://<your-deployment>/mcp
+claude mcp login --no-browser notes   # or without --no-browser, in a GUI session
+```
+
+The client discovers `/mcp/register`, registers itself, and walks through
+rust_note's own `/mcp/authorize` (which requires you to already be logged
+into the web app, and shows a one-time "Allow/Deny" consent screen naming
+the connecting client) and `/mcp/token`. Access tokens are short-lived and
+refresh automatically — there is no Authentik "Access Token Validity"
+setting to tune here, and no 5-minutes-then-dead failure mode like the one
+this project used to hit when `/mcp` was still an Authentik-backed Resource
+Server: token lifetime is entirely rust_note's own choice now.
 
 ## Environment variables
 
@@ -81,6 +90,7 @@ All server configuration is via `RUSTNOTE_*` env vars (see
 | `RUSTNOTE_SQLITE_PATH` | SQLite file (`./data/rust_note.db`) |
 | `RUSTNOTE_STATIC_DIR` | built `web/build` to serve as the SPA (unset in dev; Vite serves it) |
 | `RUSTNOTE_CORS_ORIGINS` | comma-separated allowlist. **Setting it replaces the defaults entirely** — it must then include `http://tauri.localhost` or the Android app breaks |
+| `RUSTNOTE_MCP_RESOURCE_URI` | canonical `/mcp` resource identifier, RFC 9728 `resource` value (`{RUSTNOTE_BASE_URL}/mcp`); override only if `/mcp` is reachable under a different public URL than `RUSTNOTE_BASE_URL` |
 | `RUSTNOTE_ENV=dev` / `RUSTNOTE_DEV_MODE=true` | auth bypass for local dev — never in production |
 
 ## Deployment

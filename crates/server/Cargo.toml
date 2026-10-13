@@ -33,7 +33,6 @@ futures-util = { workspace = true }
 # Remote MCP server (see workspace manifest for rationale).
 rmcp = { workspace = true }
 schemars = { workspace = true }
-jsonwebtoken = { workspace = true }
 
 base64 = { workspace = true }
 lz-str = { workspace = true }

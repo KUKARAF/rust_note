@@ -147,6 +147,24 @@ struct FlowState {
     /// field existed deserializable.
     #[serde(default)]
     client: Option<String>,
+    /// Where to send the browser after a successful login, in place of
+    /// `base_url` - used by `/mcp/authorize` to resume there once the user
+    /// has signed in. Always re-validated with [`sanitize_next`] before use
+    /// (defense in depth, in case a future edit ever bypasses the check at
+    /// `login`). `serde(default)` keeps old in-flight flow cookies
+    /// deserializable.
+    #[serde(default)]
+    next: Option<String>,
+}
+
+/// Only a same-origin, relative path under `/mcp/authorize` is accepted as a
+/// post-login redirect target - anything else (an absolute URL, a
+/// protocol-relative `//host/...`, or any other path) is rejected outright.
+/// This is the only caller of this redirect target today
+/// ([`crate::mcp::oauth::routes`]'s authorize endpoint); widening the
+/// allowlist later must stay just as strict about ruling out open redirects.
+fn sanitize_next(next: Option<String>) -> Option<String> {
+    next.filter(|n| n.starts_with("/mcp/authorize"))
 }
 
 pub fn router() -> Router<AppState> {
@@ -161,6 +179,8 @@ pub fn router() -> Router<AppState> {
 struct LoginParams {
     /// `client=app` marks a mobile-app login (see [`FlowState::client`]).
     client: Option<String>,
+    /// Where to redirect after a successful login (see [`FlowState::next`]).
+    next: Option<String>,
 }
 
 async fn login(
@@ -196,6 +216,7 @@ async fn login(
         // Only the literal "app" is recorded; anything else is treated as a
         // normal web login rather than trusted into the callback branch.
         client: params.client.filter(|c| c == "app"),
+        next: sanitize_next(params.next),
     };
     let value = serde_json::to_string(&flow_state).map_err(|e| AppError::Internal(e.into()))?;
 
@@ -333,10 +354,17 @@ async fn callback(
         ));
     }
 
-    // Redirect target after a successful login. `base_url` (root) is the
-    // simplest sensible choice - the SPA is expected to live there and can
-    // route itself to `/notes` etc. once it sees an authenticated session
-    // via `GET /auth/me`.
+    // `next` (e.g. `/mcp/authorize?...`, resuming an MCP authorization
+    // request) takes priority over the default redirect; re-validated here
+    // rather than trusted as-is from the cookie.
+    if let Some(next) = sanitize_next(flow_state.next) {
+        return Ok((jar, Redirect::to(&next)));
+    }
+
+    // Default redirect target after a successful login. `base_url` (root) is
+    // the simplest sensible choice - the SPA is expected to live there and
+    // can route itself to `/notes` etc. once it sees an authenticated
+    // session via `GET /auth/me`.
     Ok((jar, Redirect::to(&state.config.base_url)))
 }
 

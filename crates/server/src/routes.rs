@@ -307,4 +307,185 @@ mod tests {
             "a normal body must not be rejected as too large"
         );
     }
+
+    /// End-to-end MCP OAuth round trip through the real HTTP router:
+    /// register a client (no auth), authorize it (dev-mode session bypass
+    /// stands in for an already-logged-in browser), consent, exchange the
+    /// code for a token pair, then refresh - confirming the whole
+    /// self-contained Authorization Server (register -> authorize ->
+    /// decision -> token -> refresh) is wired together correctly, not just
+    /// each piece in isolation.
+    #[tokio::test]
+    async fn mcp_oauth_full_round_trip() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+
+        let (state, _notes_dir, _db_dir) = dev_state().await; // dev_mode = true
+                                                              // `dev_state()` doesn't replicate `main()`'s dev-mode bootstrap,
+                                                              // which normally seeds this row before serving any request -
+                                                              // needed here since minting an auth code/token FK-references it.
+        sqlx::query(
+            "INSERT INTO users (id, email, display_name, created_at) \
+             VALUES ('admin', 'admin@localhost', 'Admin', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let session_layer =
+            tower_sessions::SessionManagerLayer::new(tower_sessions::MemoryStore::default());
+        let app = build(state).layer(session_layer);
+
+        // 1. Register - unauthenticated, anyone can do this.
+        let redirect_uri = "https://example.com/cb";
+        let register_req = Request::builder()
+            .method("POST")
+            .uri("/mcp/register")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"redirect_uris":["{redirect_uri}"],"client_name":"test client"}}"#
+            )))
+            .unwrap();
+        let resp = app.clone().oneshot(register_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let register_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let client_id = register_json["client_id"].as_str().unwrap().to_string();
+        assert!(register_json.get("client_secret").is_none());
+
+        // 2. Authorize - dev_mode makes `session::effective_user_id` resolve
+        // the fixed "admin" user with no real cookie needed, standing in for
+        // an already-logged-in browser.
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let authorize_uri = format!(
+            "/mcp/authorize?{}",
+            urlencoded_pairs(&[
+                ("response_type", "code"),
+                ("client_id", &client_id),
+                ("redirect_uri", redirect_uri),
+                ("code_challenge", &challenge),
+                ("code_challenge_method", "S256"),
+                ("state", "xyz"),
+            ])
+        );
+        let authorize_req = Request::builder()
+            .method("GET")
+            .uri(&authorize_uri)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(authorize_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "consent page should render");
+        let flow_cookie = resp
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .expect("authorize must set the flow cookie")
+            .to_string();
+
+        // 3. Decide - allow, carrying the flow cookie back.
+        let decision_req = Request::builder()
+            .method("POST")
+            .uri("/mcp/authorize/decision")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", &flow_cookie)
+            .body(Body::from("decision=allow"))
+            .unwrap();
+        let resp = app.clone().oneshot(decision_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let location = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .to_string();
+        assert!(location.starts_with(redirect_uri));
+        let code = reqwest::Url::parse(&location)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "code")
+            .map(|(_, v)| v.into_owned())
+            .expect("redirect must carry a code");
+
+        // 4. Token exchange (authorization_code grant).
+        let token_req = Request::builder()
+            .method("POST")
+            .uri("/mcp/token")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(urlencoded_pairs(&[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", redirect_uri),
+                ("client_id", &client_id),
+                ("code_verifier", verifier),
+            ])))
+            .unwrap();
+        let resp = app.clone().oneshot(token_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let token_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let access_token = token_json["access_token"].as_str().unwrap().to_string();
+        let refresh_token = token_json["refresh_token"].as_str().unwrap().to_string();
+
+        // The minted access token must actually be accepted by the
+        // Resource-Server check guarding `/mcp` itself.
+        let mcp_req = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header("authorization", format!("Bearer {access_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(mcp_req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a freshly minted access token must pass the Resource-Server check"
+        );
+
+        // 5. Refresh - old refresh token must be rotated out.
+        let refresh_req = Request::builder()
+            .method("POST")
+            .uri("/mcp/token")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "grant_type=refresh_token&refresh_token={refresh_token}&client_id={client_id}"
+            )))
+            .unwrap();
+        let resp = app.clone().oneshot(refresh_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let replay_req = Request::builder()
+            .method("POST")
+            .uri("/mcp/token")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "grant_type=refresh_token&refresh_token={refresh_token}&client_id={client_id}"
+            )))
+            .unwrap();
+        let resp = app.oneshot(replay_req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a rotated-out refresh token must not work twice"
+        );
+    }
+
+    /// Build a properly percent-encoded `application/x-www-form-urlencoded`
+    /// string (used for both a query string and a form body - the two are
+    /// the same encoding) without pulling in a new crate just for this test.
+    fn urlencoded_pairs(pairs: &[(&str, &str)]) -> String {
+        let mut url = reqwest::Url::parse("http://placeholder.invalid/").unwrap();
+        {
+            let mut qp = url.query_pairs_mut();
+            for (k, v) in pairs {
+                qp.append_pair(k, v);
+            }
+        }
+        url.query().unwrap_or("").to_string()
+    }
 }

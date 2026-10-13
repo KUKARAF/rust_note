@@ -82,6 +82,31 @@ impl RecurringTodo {
     }
 }
 
+/// Default for [`RecurringSettings::number_emojis`] when a stored note omits
+/// it (including every note written before this field existed).
+pub(crate) fn default_number_emojis() -> i64 {
+    1
+}
+
+/// Everything stored in [`DEFS_NOTE_ID`]: the todo definitions plus how many
+/// of the currently-pending ones `/api/recurring_ascii_todo` should render.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecurringSettings {
+    #[serde(default = "default_number_emojis")]
+    pub number_emojis: i64,
+    #[serde(default)]
+    pub todos: Vec<RecurringTodo>,
+}
+
+impl Default for RecurringSettings {
+    fn default() -> Self {
+        Self {
+            number_emojis: default_number_emojis(),
+            todos: Vec::new(),
+        }
+    }
+}
+
 /// A definition plus its currently-computed done-state, returned by the GET.
 #[derive(Debug, Clone, Serialize)]
 pub struct RecurringTodoStatus {
@@ -112,19 +137,31 @@ pub(crate) fn read_note_text(state: &AppState, note_id: &str) -> String {
     }
 }
 
-/// Parse the definitions JSON out of the note body. A missing/empty/unparsable
-/// body degrades to an empty list rather than erroring.
-pub(crate) fn parse_defs(text: &str) -> Vec<RecurringTodo> {
+/// Parse [`RecurringSettings`] out of the note body. Accepts both the
+/// current object shape (`{"number_emojis": N, "todos": [...]}`) and the
+/// legacy bare-array shape every note was written in before `number_emojis`
+/// existed (`number_emojis` then defaults to 1). A missing/empty/unparsable
+/// body degrades to [`RecurringSettings::default`] rather than erroring.
+pub(crate) fn parse_settings(text: &str) -> RecurringSettings {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return Vec::new();
+        return RecurringSettings::default();
     }
-    serde_json::from_str(trimmed).unwrap_or_default()
+    if let Ok(settings) = serde_json::from_str::<RecurringSettings>(trimmed) {
+        return settings;
+    }
+    if let Ok(todos) = serde_json::from_str::<Vec<RecurringTodo>>(trimmed) {
+        return RecurringSettings {
+            number_emojis: default_number_emojis(),
+            todos,
+        };
+    }
+    RecurringSettings::default()
 }
 
-/// Load and parse the recurring-todo definitions from [`DEFS_NOTE_ID`].
-pub(crate) fn load_defs(state: &AppState) -> Vec<RecurringTodo> {
-    parse_defs(&read_note_text(state, DEFS_NOTE_ID))
+/// Load and parse the recurring-todo settings from [`DEFS_NOTE_ID`].
+pub(crate) fn load_settings(state: &AppState) -> RecurringSettings {
+    parse_settings(&read_note_text(state, DEFS_NOTE_ID))
 }
 
 /// The daily-note id for today in `tz` (`diary/YYYY-MM-DD`).
@@ -229,7 +266,7 @@ pub(crate) async fn fetch_has_unread(client: &reqwest::Client, url: &str) -> any
 
 #[cfg(test)]
 mod tests {
-    use super::is_safe_recurring_url;
+    use super::{is_safe_recurring_url, parse_settings};
 
     #[test]
     fn rejects_non_http_schemes() {
@@ -278,5 +315,38 @@ mod tests {
             "http://status.example.org:8080/status"
         ));
         assert!(is_safe_recurring_url("https://8.8.8.8/x"));
+    }
+
+    #[test]
+    fn parse_settings_empty_body_defaults() {
+        let settings = parse_settings("");
+        assert_eq!(settings.number_emojis, 1);
+        assert!(settings.todos.is_empty());
+    }
+
+    #[test]
+    fn parse_settings_reads_legacy_bare_array() {
+        // Every note written before `number_emojis` existed is a bare array.
+        let settings = parse_settings(
+            r#"[{"key":"stretches","label":"Stretches","emoji":"🧘","order":0,"kind":"local"}]"#,
+        );
+        assert_eq!(settings.number_emojis, 1);
+        assert_eq!(settings.todos.len(), 1);
+        assert_eq!(settings.todos[0].key, "stretches");
+    }
+
+    #[test]
+    fn parse_settings_reads_current_object_shape() {
+        let settings = parse_settings(
+            r#"{"number_emojis":3,"todos":[{"key":"a","label":"A","emoji":"🔔","order":0,"kind":"local"}]}"#,
+        );
+        assert_eq!(settings.number_emojis, 3);
+        assert_eq!(settings.todos.len(), 1);
+    }
+
+    #[test]
+    fn parse_settings_object_shape_without_number_emojis_defaults_to_one() {
+        let settings = parse_settings(r#"{"todos":[]}"#);
+        assert_eq!(settings.number_emojis, 1);
     }
 }
