@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::notes::fs_store::note_id_to_path;
 use crate::state::AppState;
+use rust_note_core::frontmatter::Frontmatter;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NoteMeta {
@@ -22,6 +23,27 @@ pub struct NoteMeta {
     /// wrote a newer version in the meantime (see
     /// `silent-lost-update-no-conflict-detection`).
     pub version: String,
+    /// Tags extracted from the `tags:` YAML frontmatter field.
+    /// Stored as `tags: tag1, tag2` (comma-separated, no `#` prefix).
+    /// The `#` is a display convention applied by the UI only.
+    pub tags: Vec<String>,
+}
+
+/// Extract tags from a note's YAML frontmatter `tags:` field.
+/// Accepts both `tags: tag1, tag2` and `tags: #tag1, #tag2` — the `#`
+/// prefix is stripped so callers receive bare tag names.
+fn extract_tags(content: &str) -> Vec<String> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+    let fm = Frontmatter::parse(content);
+    let Some(raw) = fm.get("tags") else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .map(|t| t.trim().trim_start_matches('#').to_string())
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 /// Extract a title from the first `# Heading` line of `content`, falling
@@ -96,6 +118,7 @@ pub async fn build_meta(
         created_at,
         updated_at,
         version,
+        tags: extract_tags(content),
     })
 }
 
@@ -136,6 +159,7 @@ pub async fn build_list_meta(
         created_at,
         updated_at,
         version: String::new(),
+        tags: extract_tags(content),
     })
 }
 

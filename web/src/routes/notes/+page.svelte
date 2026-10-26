@@ -103,6 +103,7 @@
 					label: n.title,
 					hint: n.id,
 					group: 'note' as const,
+					tags: n.tags,
 					run: () => goto(resolve(`/notes/${encodeNotePath(n.id)}`))
 				}));
 				return [...folderRows, ...noteRows];
@@ -384,6 +385,13 @@
 							{#if item.hint}
 								<span class="row-hint" title={item.hint}>{item.hint}</span>
 							{/if}
+							{#if item.tags && item.tags.length > 0}
+								<span class="row-tags">
+									{#each item.tags as tag (tag)}
+										<span class="tag">#{tag}</span>
+									{/each}
+								</span>
+							{/if}
 							<span class="row-chip">
 								<Chip color={chipColor(item)} variant="outline">
 									{item.group}
@@ -517,6 +525,22 @@
 		white-space: nowrap;
 		flex: 0 1 auto;
 		min-width: 0;
+	}
+
+	.row-tags {
+		display: flex;
+		gap: var(--space-2);
+		flex: 0 0 auto;
+		flex-wrap: nowrap;
+		overflow: hidden;
+	}
+
+	.tag {
+		font-family: var(--font-term);
+		font-size: var(--type-meta);
+		color: var(--kv-accent);
+		opacity: 0.7;
+		white-space: nowrap;
 	}
 
 	.row-chip {

@@ -22,6 +22,7 @@ export interface NoteMeta {
 	owner_id: string;
 	created_at: string;
 	updated_at: string;
+	tags?: string[];
 }
 
 export interface PaletteItem {
@@ -31,6 +32,8 @@ export interface PaletteItem {
 	group: 'action' | 'note' | 'folder';
 	/** Renders in red (e.g. "delete"). Only ever one such item at a time. */
 	destructive?: boolean;
+	/** Tag names (bare, no `#` prefix) — only set for group === 'note'. */
+	tags?: string[];
 	run: () => void | Promise<void>;
 }
 
@@ -180,7 +183,12 @@ export function filterItems(
 	const matchedNotes = (
 		q === ''
 			? notes
-			: notes.filter((n) => n.title.toLowerCase().includes(q) || n.id.toLowerCase().includes(q))
+			: notes.filter(
+					(n) =>
+						n.title.toLowerCase().includes(q) ||
+						n.id.toLowerCase().includes(q) ||
+						(n.tags ?? []).some((t) => t.toLowerCase().includes(q.replace(/^#/, '')))
+				)
 	)
 		.slice(0, noteLimit)
 		.map((n): PaletteItem => ({
@@ -188,6 +196,7 @@ export function filterItems(
 			label: n.title,
 			hint: n.id === n.title ? undefined : n.id,
 			group: 'note',
+			tags: n.tags,
 			run: () => goto(resolve(`/notes/${encodeNotePath(n.id)}`))
 		}));
 
