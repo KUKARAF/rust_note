@@ -28,7 +28,7 @@ export interface PaletteItem {
 	id: string;
 	label: string;
 	hint?: string;
-	group: 'action' | 'note';
+	group: 'action' | 'note' | 'folder';
 	/** Renders in red (e.g. "delete"). Only ever one such item at a time. */
 	destructive?: boolean;
 	run: () => void | Promise<void>;

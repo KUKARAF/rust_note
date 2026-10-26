@@ -1,17 +1,14 @@
 <script lang="ts">
-	// Note list view — doubling as the inline command search: the search box
-	// filters commands AND notes in one unified list (same model as the modal
-	// command palette, via $lib/commandPalette/items). Static-shaped route, so —
-	// consistent with adapter-static/ssr=false — data is fetched client-side on
-	// mount rather than via a `+page.ts` load function.
 	import { onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
+	import { page } from '$app/state';
 	import { apiGet, apiPost, ApiError } from '$lib/api/client';
 	import { cacheNotesList, readNotesListCache } from '$lib/stores/offline';
 	import { auth, flagLoginRequired } from '$lib/stores/auth';
 	import { IS_APP } from '$lib/api/deviceToken';
 	import { encodeNotePath } from '$lib/notes/path';
+	import { getSubFolders, getDirectNotes, getBreadcrumbs, slugifySegment } from '$lib/notes/folders';
 	import {
 		buildActions,
 		filterItems,
@@ -24,6 +21,7 @@
 	import Input from '$lib/design/Input.svelte';
 	import Chip from '$lib/design/Chip.svelte';
 	import SectionTitle from '$lib/design/SectionTitle.svelte';
+	import Breadcrumb from '$lib/design/Breadcrumb.svelte';
 
 	let notes = $state<NoteMeta[]>([]);
 	let loading = $state(true);
@@ -35,20 +33,86 @@
 	let selectedIndex = $state(0);
 	let creating = $state(false);
 	let createError = $state<string | null>(null);
+	let searchScope = $state<'folder' | 'all'>('folder');
 
 	let filterInput: HTMLInputElement | undefined = $state();
 	let listEl: HTMLUListElement | undefined = $state();
 
-	// Unified command + note list, from the same builder the modal palette uses.
-	// No note cap here (Infinity) — this is the full vault, not a launcher. The
-	// last argument drops a deleted note from the list (and its offline cache)
-	// the moment the delete command succeeds.
+	// --- Folder state (derived from URL ?f= param) ---
+
+	const currentFolder = $derived(page.url.searchParams.get('f') ?? '');
+	const breadcrumbs = $derived(getBreadcrumbs(currentFolder));
+	const folderFolders = $derived(getSubFolders(notes, currentFolder));
+	const folderNotes = $derived(getDirectNotes(notes, currentFolder));
+
+	// Reset scope to 'folder' whenever the search filter is cleared.
+	$effect(() => {
+		if (!filter) searchScope = 'folder';
+	});
+
+	// Reset selection index when the active folder changes.
+	$effect(() => {
+		// eslint-disable-next-line @typescript-eslint/no-unused-expressions
+		currentFolder;
+		selectedIndex = 0;
+	});
+
+	function setFolder(path: string) {
+		filter = '';
+		selectedIndex = 0;
+		void goto(resolve('/notes') + (path ? '?f=' + encodeURIComponent(path) : ''));
+	}
+
+	function leaveFolder() {
+		const parts = currentFolder.split('/');
+		parts.pop();
+		setFolder(parts.join('/'));
+	}
+
+	function onNoteDeleted(id: string) {
+		notes = notes.filter((n) => n.id !== id);
+		cacheNotesList(notes);
+	}
+
+	// Unified item list for keyboard navigation. Behaviour differs by context:
+	// - Root, no filter    → actions + all notes (existing behaviour)
+	// - Root, with filter  → matching actions + notes (existing behaviour)
+	// - Folder, no filter  → sub-folder rows + direct-child notes
+	// - Folder, with filter → search scoped to folder or all notes
 	const items = $derived<PaletteItem[]>(
-		filterItems(filter, buildActions({ user: $auth.user }), notes, Infinity, (id) => {
-			notes = notes.filter((n) => n.id !== id);
-			cacheNotesList(notes);
-		})
+		(() => {
+			if (currentFolder === '') {
+				return filterItems(
+					filter,
+					buildActions({ user: $auth.user }),
+					notes,
+					Infinity,
+					onNoteDeleted
+				);
+			}
+			if (filter === '') {
+				const folderRows: PaletteItem[] = folderFolders.map((f) => ({
+					id: `folder:${f}`,
+					label: (f.split('/').pop() ?? f) + '/',
+					hint: undefined,
+					group: 'folder' as const,
+					run: () => setFolder(f)
+				}));
+				const noteRows: PaletteItem[] = folderNotes.map((n) => ({
+					id: `note:${n.id}`,
+					label: n.title,
+					hint: n.id,
+					group: 'note' as const,
+					run: () => goto(resolve(`/notes/${encodeNotePath(n.id)}`))
+				}));
+				return [...folderRows, ...noteRows];
+			}
+			// Searching inside a folder: no actions (they're vault-global).
+			const searchNotes = searchScope === 'folder' ? folderNotes : notes;
+			return filterItems(filter, [], searchNotes, Infinity, onNoteDeleted);
+		})()
 	);
+
 	const noteCount = $derived(items.filter((i) => i.group === 'note').length);
 
 	async function loadNotes() {
@@ -56,7 +120,6 @@
 		loadError = null;
 		try {
 			notes = await apiGet<NoteMeta[]>('/api/notes');
-			// Cache for offline fallback (and mark the shown list as live).
 			cacheNotesList(notes);
 			offlineCachedAt = null;
 		} catch (err) {
@@ -66,8 +129,6 @@
 				return;
 			}
 			if (err instanceof ApiError && err.status === 0) {
-				// Offline: fall back to the last successfully fetched list, with
-				// a banner noting its age. No cache -> a dedicated offline error.
 				const cached = readNotesListCache();
 				if (cached) {
 					notes = cached.notes;
@@ -86,13 +147,8 @@
 	onMount(() => {
 		void loadNotes();
 
-		// Let the layout's swipe-down gesture focus THIS search (there's no
-		// modal palette needed while the inline search is on screen).
 		notesSearchFocuser.set(() => filterInput?.focus());
 
-		// Refresh whenever the app returns to the foreground (tab refocused,
-		// Android webview resumed), so a list opened offline goes live again as
-		// soon as connectivity is back — without a manual reload.
 		const onVisibilityChange = () => {
 			if (document.visibilityState === 'visible') void loadNotes();
 		};
@@ -106,7 +162,6 @@
 		};
 	});
 
-	/** Coarse "how stale is the cached list" hint for the offline banner. */
 	function relativeAge(at: number): string {
 		const minutes = Math.round((Date.now() - at) / 60_000);
 		if (minutes < 1) return 'just now';
@@ -116,7 +171,6 @@
 		return `${Math.round(hours / 24)}d ago`;
 	}
 
-	// Keep the selection in range whenever the item list changes.
 	$effect(() => {
 		if (selectedIndex >= items.length) {
 			selectedIndex = Math.max(0, items.length - 1);
@@ -141,8 +195,6 @@
 	}
 
 	function onKeydown(event: KeyboardEvent) {
-		// Modifier combos belong to global shortcuts (Ctrl/Cmd+K opens the
-		// command palette in the layout) — never treat them as list navigation.
 		if (event.ctrlKey || event.metaKey || event.altKey) return;
 
 		const target = event.target as HTMLElement | null;
@@ -187,12 +239,16 @@
 	}
 
 	async function createNote() {
-		const title = window.prompt('Title for the new note:');
+		const promptLabel = currentFolder
+			? `Title for the new note in ${currentFolder}:`
+			: 'Title for the new note:';
+		const title = window.prompt(promptLabel);
 		if (!title || !title.trim()) return;
 		creating = true;
 		createError = null;
 		try {
-			const meta = await apiPost<NoteMeta>('/api/notes', { id_or_title: title.trim() });
+			const idOrTitle = currentFolder ? `${currentFolder}/${title.trim()}` : title.trim();
+			const meta = await apiPost<NoteMeta>('/api/notes', { id_or_title: idOrTitle });
 			await goto(resolve(`/notes/${encodeNotePath(meta.id)}`));
 		} catch (err) {
 			if (err instanceof ApiError && err.status === 401) {
@@ -210,21 +266,47 @@
 			creating = false;
 		}
 	}
+
+	function createFolder() {
+		const promptLabel = currentFolder
+			? `Name for the new folder inside ${currentFolder}:`
+			: 'Name for the new folder:';
+		const name = window.prompt(promptLabel);
+		if (!name || !name.trim()) return;
+		const slug = slugifySegment(name.trim());
+		if (!slug) {
+			window.alert('Invalid folder name — use letters, numbers, or hyphens.');
+			return;
+		}
+		const newPath = currentFolder ? `${currentFolder}/${slug}` : slug;
+		setFolder(newPath);
+	}
+
+	// Chip colour for each item group.
+	function chipColor(item: PaletteItem): 'accent' | 'orange' | 'danger' | 'dim' {
+		if (item.destructive) return 'danger';
+		if (item.group === 'action') return 'accent';
+		if (item.group === 'folder') return 'orange';
+		return 'dim';
+	}
 </script>
 
 <svelte:window onkeydown={onKeydown} />
 
-<!-- The '/' suffix is a keyboard-shortcut hint — meaningless on touch, so
-     the app build omits it (passed conditionally to the filter Input). -->
 {#snippet slashHint()}/{/snippet}
 
 <div class="notes-page">
 	<Card class="notes-card">
 		<div class="notes-header">
-			<SectionTitle>Vault</SectionTitle>
-			<Button variant="primary" size="sm" onclick={createNote} disabled={creating}>
-				{creating ? 'Creating…' : '+ New note'}
-			</Button>
+			<SectionTitle>
+				{currentFolder ? (currentFolder.split('/').pop() ?? currentFolder) : 'Vault'}
+			</SectionTitle>
+			<div class="header-actions">
+				<Button variant="outline" size="sm" onclick={createFolder}>+ New folder</Button>
+				<Button variant="primary" size="sm" onclick={createNote} disabled={creating}>
+					{creating ? 'Creating…' : '+ New note'}
+				</Button>
+			</div>
 		</div>
 
 		{#if createError}
@@ -235,6 +317,10 @@
 			<p class="offline-banner">
 				offline — showing cached list ({relativeAge(offlineCachedAt)})
 			</p>
+		{/if}
+
+		{#if currentFolder}
+			<Breadcrumb crumbs={breadcrumbs} onnavigate={setFolder} />
 		{/if}
 
 		<div class="filter-row">
@@ -249,10 +335,33 @@
 			</Input>
 		</div>
 
+		{#if filter && currentFolder}
+			<div class="scope-row">
+				<button
+					type="button"
+					class="scope-btn"
+					onclick={() => {
+						searchScope = searchScope === 'folder' ? 'all' : 'folder';
+					}}
+				>
+					<Chip color={searchScope === 'folder' ? 'accent' : 'dim'} variant="outline">
+						{searchScope === 'folder'
+							? `in ${currentFolder.split('/').pop()}`
+							: 'all notes'} ×
+					</Chip>
+				</button>
+			</div>
+		{/if}
+
 		{#if loading}
 			<p class="status-line">Loading notes…</p>
 		{:else if loadError}
 			<p class="status-line error">Error loading notes: {loadError}</p>
+		{:else if currentFolder && !filter && folderFolders.length === 0 && folderNotes.length === 0}
+			<div class="empty-folder">
+				<p class="status-line">This folder is empty.</p>
+				<Button variant="outline" size="sm" onclick={leaveFolder}>← Leave folder</Button>
+			</div>
 		{:else if items.length === 0}
 			<p class="status-line">Nothing matches "{filter}".</p>
 		{:else}
@@ -265,6 +374,7 @@
 							data-selected={index === selectedIndex}
 							class:selected={index === selectedIndex}
 							class:destructive={item.destructive === true}
+							class:folder-row={item.group === 'folder'}
 							onmouseenter={() => (selectedIndex = index)}
 							onclick={() => void item.run()}
 						>
@@ -275,10 +385,7 @@
 								<span class="row-hint" title={item.hint}>{item.hint}</span>
 							{/if}
 							<span class="row-chip">
-								<Chip
-									color={item.destructive ? 'danger' : item.group === 'action' ? 'accent' : 'dim'}
-									variant="outline"
-								>
+								<Chip color={chipColor(item)} variant="outline">
 									{item.group}
 								</Chip>
 							</span>
@@ -316,8 +423,30 @@
 		margin-bottom: var(--space-6);
 	}
 
+	.header-actions {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		flex-shrink: 0;
+	}
+
 	.filter-row {
-		margin-bottom: var(--space-6);
+		margin-bottom: var(--space-4);
+	}
+
+	.scope-row {
+		margin-bottom: var(--space-4);
+	}
+
+	.scope-btn {
+		background: none;
+		border: none;
+		padding: 0;
+		cursor: pointer;
+	}
+
+	.scope-btn:hover {
+		opacity: 0.75;
 	}
 
 	.notes-list {
@@ -353,6 +482,12 @@
 	.row.selected {
 		background: rgba(121, 242, 121, 0.07);
 		border-left: 2px solid var(--kv-accent);
+	}
+
+	.row.folder-row:hover,
+	.row.folder-row.selected {
+		background: rgba(255, 165, 0, 0.06);
+		border-left-color: var(--kv-orange);
 	}
 
 	.row.destructive .row-label {
@@ -403,6 +538,17 @@
 		font-size: var(--type-meta);
 		color: var(--kv-faint);
 		margin: 0 0 var(--space-4);
+	}
+
+	.empty-folder {
+		display: flex;
+		align-items: center;
+		gap: var(--space-5);
+		flex-wrap: wrap;
+	}
+
+	.empty-folder .status-line {
+		margin: 0;
 	}
 
 	.notes-count {
