@@ -89,7 +89,7 @@ fn is_acceptable_redirect_uri(uri: &str) -> bool {
                 .strip_prefix('[')
                 .and_then(|h| h.strip_suffix(']'))
                 .unwrap_or(host);
-            host == "127.0.0.1" || host == "::1"
+            host == "127.0.0.1" || host == "::1" || host == "localhost"
         }
         _ => true,
     }
@@ -111,7 +111,7 @@ fn validate_redirect_uris(uris: &[String]) -> Result<(), &'static str> {
         }
         if !is_acceptable_redirect_uri(uri) {
             return Err(
-                "redirect_uris must be https://, a loopback http://127.0.0.1 or http://[::1] \
+                "redirect_uris must be https://, a loopback http://127.0.0.1, http://localhost or http://[::1] \
                  URI (any port), or a private custom scheme",
             );
         }
@@ -547,6 +547,7 @@ mod tests {
     fn accepts_loopback_http_any_port() {
         assert!(is_acceptable_redirect_uri("http://127.0.0.1:51234/cb"));
         assert!(is_acceptable_redirect_uri("http://[::1]:9999/cb"));
+        assert!(is_acceptable_redirect_uri("http://localhost:8080/callback"));
     }
 
     #[test]
