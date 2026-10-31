@@ -14,8 +14,9 @@ use axum_extra::extract::WithRejection;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, ContentBlock, ListResourceTemplatesResult, ListResourcesResult,
-    PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
-    Resource, ResourceContents, ResourceTemplate, ServerCapabilities, ServerConfig,
+    ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
+    ReadResourceResult, Resource, ResourceContents, ResourceTemplate, ServerCapabilities,
+    ServerConfig,
 };
 use rmcp::service::RequestContext;
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler};
@@ -499,6 +500,35 @@ struct LogPipelineEventArgs {
     next_action: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct MarkRecurringDoneArgs {
+    /// Which recurring todo: its label or key (case-insensitive).
+    item: String,
+    /// `true` (default) marks it done for today; `false` un-marks it.
+    #[serde(default = "default_true")]
+    done: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Static fallback description used when no Local recurring todos exist.
+const MARK_RECURRING_DESC: &str = "Mark a recurring todo as done for today.";
+
+/// The `mark_recurring_done` description, listing the current Local todos.
+fn mark_recurring_description(todos: Vec<crate::recurring::RecurringTodo>) -> String {
+    let labels: Vec<String> = crate::recurring::routes::local_todos(todos)
+        .into_iter()
+        .map(|t| t.label)
+        .collect();
+    if labels.is_empty() {
+        MARK_RECURRING_DESC.to_string()
+    } else {
+        format!("{} Options: {}", MARK_RECURRING_DESC, labels.join(", "))
+    }
+}
+
 #[tool_router]
 impl McpServer {
     pub fn new(state: AppState) -> Self {
@@ -521,6 +551,31 @@ impl McpServer {
             .filter(|m| !is_settings_id(&m.id))
             .map(|m| json!({ "id": m.id, "title": m.title, "updated_at": m.updated_at }))
             .collect())
+    }
+
+    #[tool(description = "Mark a recurring todo as done for today.")]
+    async fn mark_recurring_done(
+        &self,
+        Parameters(args): Parameters<MarkRecurringDoneArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let user = require_user(&ctx)?;
+        let todos = crate::recurring::load_settings(&self.state).todos;
+        let todo = match crate::recurring::routes::resolve_local_item(&todos, &args.item) {
+            Ok(t) => t,
+            Err(msg) => return Ok(CallToolResult::error(vec![ContentBlock::text(msg)])),
+        };
+        match crate::recurring::routes::set_recurring_done(&self.state, &user, &todo.key, args.done)
+            .await
+        {
+            Ok(note_id) => json_ok(&json!({
+                "key": todo.key,
+                "label": todo.label,
+                "done": args.done,
+                "date": note_id.trim_start_matches("diary/"),
+            })),
+            Err(e) => Ok(app_error_to_tool(e)),
+        }
     }
 
     #[tool(
@@ -1085,6 +1140,25 @@ impl McpServer {
 
 #[tool_handler]
 impl ServerHandler for McpServer {
+    /// Same as the macro-generated listing, except `mark_recurring_done`'s
+    /// description is rebuilt from the current recurring definitions so the
+    /// model sees the valid options without a separate lookup call.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let mut tools = Self::tool_router().list_all();
+        let desc = mark_recurring_description(crate::recurring::load_settings(&self.state).todos);
+        for tool in tools.iter_mut().filter(|t| t.name == "mark_recurring_done") {
+            tool.description = Some(desc.clone().into());
+        }
+        Ok(ListToolsResult {
+            tools,
+            ..Default::default()
+        })
+    }
+
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(
             ServerCapabilities::builder()
@@ -1094,7 +1168,8 @@ impl ServerHandler for McpServer {
         )
         .with_instructions(
             "rust_note MCP server: read and update notes, todos, and daily stats. \
-             Read the stats://docs and todo://grammar resources to learn the formats.",
+             Read the stats://docs and todo://grammar resources to learn the formats. \
+             Use mark_recurring_done to tick a recurring daily todo in one call.",
         )
     }
 
@@ -1344,5 +1419,42 @@ mod tests {
             .authorize_write("alice", "notes/does-not-exist")
             .await;
         assert!(matches!(res, Err(AppError::NotFound)), "got {res:?}");
+    }
+
+    fn local(key: &str, label: &str, order: i64) -> crate::recurring::RecurringTodo {
+        crate::recurring::RecurringTodo {
+            key: key.to_string(),
+            label: label.to_string(),
+            emoji: "x".to_string(),
+            order,
+            kind: crate::recurring::RecurringKind::Local,
+            url: None,
+            regex: None,
+        }
+    }
+
+    #[test]
+    fn mark_recurring_description_lists_labels_in_order() {
+        let desc = mark_recurring_description(vec![
+            local("stretches", "stretches", 1),
+            local("exercise", "exercise", 0),
+            local("work", "search for work 1h", 2),
+        ]);
+        assert_eq!(
+            desc,
+            "Mark a recurring todo as done for today. \
+             Options: exercise, stretches, search for work 1h"
+        );
+        assert_eq!(mark_recurring_description(vec![]), MARK_RECURRING_DESC);
+    }
+
+    #[tokio::test]
+    async fn list_tools_description_reflects_definitions() {
+        let (server, _n, _d) = test_server().await;
+        let tools = McpServer::tool_router().list_all();
+        assert!(tools.iter().any(|t| t.name == "mark_recurring_done"));
+        // With no definitions the static fallback applies.
+        let desc = mark_recurring_description(crate::recurring::load_settings(&server.state).todos);
+        assert_eq!(desc, MARK_RECURRING_DESC);
     }
 }

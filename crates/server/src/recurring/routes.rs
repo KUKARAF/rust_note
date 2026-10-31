@@ -216,31 +216,93 @@ async fn set_done(
     Path(key): Path<String>,
     WithRejection(Json(body), _): WithRejection<Json<SetDoneRequest>, AppError>,
 ) -> AppResult<Json<OkResponse>> {
-    let tz = settings_tz(&state, &user_id).await?;
+    set_recurring_done(&state, &user_id, &key, body.done).await?;
+    Ok(Json(OkResponse { ok: true }))
+}
+
+/// Set today's frontmatter flag `key` to `done` in the user's daily note,
+/// returning the note's date id (`diary/YYYY-MM-DD`). Shared by the REST
+/// handler and the MCP `mark_recurring_done` tool.
+pub(crate) async fn set_recurring_done(
+    state: &AppState,
+    user_id: &str,
+    key: &str,
+    done: bool,
+) -> AppResult<String> {
+    let tz = settings_tz(state, user_id).await?;
     let note_id = today_daily_note_id(&tz);
 
     // Register (creating today's owned daily note when new) then authorize the
     // frontmatter write — a daily note owned by another user must not be
     // written through here.
-    acl::ensure_note_registered(&state.db, &note_id, &user_id)
+    acl::ensure_note_registered(&state.db, &note_id, user_id)
         .await
         .map_err(AppError::Internal)?;
-    if !acl::can_write(&state.db, &note_id, &user_id)
+    if !acl::can_write(&state.db, &note_id, user_id)
         .await
         .map_err(AppError::Internal)?
     {
         return Err(AppError::Forbidden);
     }
 
-    let value = if body.done { "true" } else { "false" };
-    edit_note_through_room(&state, &note_id, &user_id, move |old| {
+    let value = if done { "true" } else { "false" };
+    let key = key.to_string();
+    edit_note_through_room(state, &note_id, user_id, move |old| {
         let mut fm = Frontmatter::parse(old);
         fm.set(&key, value);
         Some(fm.render())
     })
     .await?;
 
-    Ok(Json(OkResponse { ok: true }))
+    Ok(note_id)
+}
+
+/// The `Local` rows (the only ones that can be marked done by hand), in order.
+pub(crate) fn local_todos(todos: Vec<RecurringTodo>) -> Vec<RecurringTodo> {
+    let mut local: Vec<RecurringTodo> = todos
+        .into_iter()
+        .filter(|t| t.kind == RecurringKind::Local)
+        .collect();
+    local.sort_by_key(|t| t.order);
+    local
+}
+
+/// Resolve a user-supplied `item` against `todos` (Local rows only), matching
+/// the trimmed, case-insensitive key or label. Errors with a message listing
+/// the valid options when nothing (or more than one row) matches.
+pub(crate) fn resolve_local_item(
+    todos: &[RecurringTodo],
+    item: &str,
+) -> Result<RecurringTodo, String> {
+    let needle = item.trim().to_lowercase();
+    let local: Vec<&RecurringTodo> = todos
+        .iter()
+        .filter(|t| t.kind == RecurringKind::Local)
+        .collect();
+    let options = || {
+        local
+            .iter()
+            .map(|t| t.label.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let matches: Vec<&&RecurringTodo> = local
+        .iter()
+        .filter(|t| t.key.to_lowercase() == needle || t.label.to_lowercase() == needle)
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok((***one).clone()),
+        [] => Err(format!(
+            "unknown recurring item {:?}. Valid options: {}",
+            item.trim(),
+            options()
+        )),
+        _ => Err(format!(
+            "ambiguous recurring item {:?}. Valid options: {}",
+            item.trim(),
+            options()
+        )),
+    }
 }
 
 // ---- GET /api/recurring_ascii_todo -----------------------------------------
@@ -252,9 +314,7 @@ async fn set_done(
 /// Meant to be polled by an external status widget, so it is intentionally
 /// unauthenticated. Recurring definitions are a global note and "today" is
 /// resolved in the default timezone.
-async fn ascii_todo(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn ascii_todo(State(state): State<AppState>) -> impl IntoResponse {
     let emoji = compute_ascii_emoji(&state).await;
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], emoji)
 }
@@ -512,5 +572,52 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn resolve_local_item_matches_key_or_label_case_insensitively() {
+        let mut stretch = local_todo("stretches", "🧘", 1);
+        stretch.label = "Search for work 1h".to_string();
+        let todos = vec![stretch, local_todo("exercise", "🏃", 0)];
+        assert_eq!(
+            resolve_local_item(&todos, "  SEARCH for work 1H ")
+                .unwrap()
+                .key,
+            "stretches"
+        );
+        assert_eq!(
+            resolve_local_item(&todos, "Stretches").unwrap().key,
+            "stretches"
+        );
+    }
+
+    #[test]
+    fn resolve_local_item_rejects_unknown_and_non_local() {
+        let todos = vec![
+            local_todo("exercise", "🏃", 0),
+            foreign_todo("mail", "https://x.test"),
+        ];
+        let err = resolve_local_item(&todos, "mail").unwrap_err();
+        assert!(err.contains("Valid options: exercise"), "got {err}");
+        assert!(
+            !err.contains("mail,") && !err.ends_with("mail"),
+            "got {err}"
+        );
+        assert!(resolve_local_item(&todos, "nope").is_err());
+    }
+
+    #[tokio::test]
+    async fn set_recurring_done_writes_todays_frontmatter() {
+        let (state, _notes_dir, _db_dir) = test_state().await;
+        let note_id = set_recurring_done(&state, "alice", "exercise", true)
+            .await
+            .unwrap();
+        let fm = Frontmatter::parse(&read_note_text(&state, &note_id));
+        assert!(local_done(&fm, "exercise"));
+        set_recurring_done(&state, "alice", "exercise", false)
+            .await
+            .unwrap();
+        let fm = Frontmatter::parse(&read_note_text(&state, &note_id));
+        assert!(!local_done(&fm, "exercise"));
     }
 }
