@@ -90,6 +90,13 @@ export function buildActions(ctx: { user: AuthUser | null }): PaletteItem[] {
 			run: () => goto(resolve('/stats'))
 		},
 		{
+			id: 'bodyfat',
+			label: 'Body fat',
+			hint: 'log skinfold measurements',
+			group: 'action',
+			run: () => goto(resolve('/bodyfat'))
+		},
+		{
 			id: 'new-drawing',
 			label: 'New drawing',
 			hint: 'create an Excalidraw note',

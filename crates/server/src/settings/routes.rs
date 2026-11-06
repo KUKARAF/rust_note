@@ -7,8 +7,8 @@ use axum_extra::extract::WithRejection;
 use serde::{Deserialize, Serialize};
 
 use super::store::{
-    self, is_valid_model_id, is_valid_notify_priority, is_valid_notify_scope, UserSettings,
-    KNOWN_THEMES,
+    self, is_valid_birth_date, is_valid_model_id, is_valid_notify_priority, is_valid_notify_scope,
+    is_valid_sex, UserSettings, KNOWN_THEMES,
 };
 use crate::auth::session::RequireAuth;
 use crate::error::{AppError, AppResult};
@@ -47,6 +47,12 @@ struct SettingsResponse {
     /// Whether a priority-notify token is stored. The token itself is NEVER
     /// returned (mirrors `has_openrouter_key`).
     has_notify_token: bool,
+
+    // ---- body-fat profile ----
+    /// `male` / `female`, or `""` when unset.
+    sex: String,
+    /// `YYYY-MM-DD`, or `""` when unset.
+    birth_date: String,
 }
 
 impl SettingsResponse {
@@ -63,6 +69,8 @@ impl SettingsResponse {
             notify_scope: s.notify_scope.clone(),
             notify_schedule: s.notify_schedule.clone(),
             has_notify_token: !s.notify_token.is_empty(),
+            sex: s.sex.clone(),
+            birth_date: s.birth_date.clone(),
         }
     }
 }
@@ -90,6 +98,12 @@ struct PutSettingsRequest {
     /// Write-only secret (like `openrouter_api_key`): accepted on PUT, never
     /// echoed back.
     notify_token: Option<String>,
+
+    // ---- body-fat profile ----
+    /// `male` / `female`, or `""` to clear.
+    sex: Option<String>,
+    /// `YYYY-MM-DD` (not in the future), or `""` to clear.
+    birth_date: Option<String>,
 }
 
 async fn get_settings(
@@ -155,6 +169,20 @@ async fn put_settings(
             ));
         }
     }
+    if let Some(sex) = &body.sex {
+        if !is_valid_sex(sex) {
+            return Err(AppError::BadRequest(
+                "sex must be male or female".to_string(),
+            ));
+        }
+    }
+    if let Some(birth_date) = &body.birth_date {
+        if !is_valid_birth_date(birth_date) {
+            return Err(AppError::BadRequest(
+                "birth_date must be a past date written YYYY-MM-DD".to_string(),
+            ));
+        }
+    }
     if let Some(endpoint) = &body.ai_endpoint {
         if !notify::is_valid_endpoint(endpoint) {
             return Err(AppError::BadRequest(
@@ -214,6 +242,12 @@ async fn put_settings(
     // Write-only secret (even empty, to clear it); omitted leaves it as-is.
     if let Some(token) = &body.notify_token {
         fm.set("notify_token", token);
+    }
+    if let Some(sex) = &body.sex {
+        fm.set("sex", sex);
+    }
+    if let Some(birth_date) = &body.birth_date {
+        fm.set("birth_date", birth_date);
     }
     let new_content = fm.render();
 
@@ -654,6 +688,64 @@ mod tests {
         .unwrap()
         .0;
         assert_eq!(resp.ai_command_model, "openai/gpt-4o-mini");
+    }
+
+    #[tokio::test]
+    async fn body_profile_round_trips_and_rejects_bad_values() {
+        let (state, _notes_dir, _db_dir) = test_state().await;
+        let put = |req: PutSettingsRequest| {
+            put_settings(
+                State(state.clone()),
+                RequireAuth("alice".to_string()),
+                WithRejection(Json(req), std::marker::PhantomData),
+            )
+        };
+
+        let resp = get_settings(State(state.clone()), RequireAuth("alice".to_string()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!((resp.sex.as_str(), resp.birth_date.as_str()), ("", ""));
+
+        let resp = put(PutSettingsRequest {
+            sex: Some("female".to_string()),
+            birth_date: Some("1994-06-15".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(resp.sex, "female");
+        assert_eq!(resp.birth_date, "1994-06-15");
+
+        // A partial update leaves the other field alone.
+        let resp = put(PutSettingsRequest {
+            sex: Some("male".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(
+            (resp.sex.as_str(), resp.birth_date.as_str()),
+            ("male", "1994-06-15")
+        );
+
+        for bad in [
+            PutSettingsRequest {
+                sex: Some("other".to_string()),
+                ..Default::default()
+            },
+            PutSettingsRequest {
+                birth_date: Some("1994-02-30".to_string()),
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(
+                put(bad).await.unwrap_err(),
+                AppError::BadRequest(_)
+            ));
+        }
     }
 
     #[tokio::test]

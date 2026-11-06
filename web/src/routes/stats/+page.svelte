@@ -11,6 +11,7 @@
 	import { apiGet, apiPut, ApiError } from '$lib/api/client';
 	import { flagLoginRequired } from '$lib/stores/auth';
 	import FoodCalendar from '$lib/stats/FoodCalendar.svelte';
+	import BodyFat from '$lib/stats/BodyFat.svelte';
 	import {
 		dayValueMap,
 		dayPointsMap,
@@ -462,6 +463,15 @@
 					<span class="aside">tap a day</span>
 				</div>
 				<FoodCalendar days={foodDays} {today} />
+			</section>
+
+			<!-- ===== BODY FAT ===== -->
+			<section>
+				<div class="sec-head">
+					<h2>Body fat</h2>
+					<span class="aside">monthly · caliper</span>
+				</div>
+				<BodyFat {today} />
 			</section>
 
 			<!-- ===== PIPELINE ===== -->
