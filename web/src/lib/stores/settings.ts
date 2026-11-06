@@ -7,6 +7,9 @@ export type Theme = 'ration';
 /** `notify_scope` — which side of the pipeline ball counts as overdue for the digest. */
 export type NotifyScope = 'ours' | 'theirs' | 'both';
 
+/** `sex` — which body-fat chart applies. */
+export type BodySex = 'male' | 'female';
+
 /** `notify_priority` — priority-notify's own priority levels. */
 export type NotifyPriority = 'low' | 'medium' | 'high' | 'critical';
 
@@ -32,6 +35,10 @@ export interface SettingsState {
 	notifySchedule: string;
 	/** Whether a priority-notify API token is stored server-side (never the token itself). */
 	hasNotifyToken: boolean;
+	/** Body-fat profile: picks the men/women chart. Empty when not set. */
+	sex: BodySex | '';
+	/** Birth date `YYYY-MM-DD`, or empty when not set. */
+	birthDate: string;
 	loading: boolean;
 }
 
@@ -48,6 +55,8 @@ interface SettingsResponse {
 	notify_scope: NotifyScope;
 	notify_schedule: string;
 	has_notify_token: boolean;
+	sex: BodySex | '';
+	birth_date: string;
 }
 
 const STORAGE_KEY = 'rust-note-theme';
@@ -92,6 +101,8 @@ export const settings = writable<SettingsState>({
 	notifyScope: 'both',
 	notifySchedule: DEFAULT_NOTIFY_SCHEDULE,
 	hasNotifyToken: false,
+	sex: '',
+	birthDate: '',
 	loading: true
 });
 
@@ -120,6 +131,8 @@ export async function loadSettings(): Promise<void> {
 			notifyScope: result.notify_scope || 'both',
 			notifySchedule: result.notify_schedule || DEFAULT_NOTIFY_SCHEDULE,
 			hasNotifyToken: result.has_notify_token,
+			sex: result.sex ?? '',
+			birthDate: result.birth_date ?? '',
 			loading: false
 		});
 	} catch (err) {
@@ -174,6 +187,20 @@ export interface AiModelsResult {
  */
 export function fetchAiModels(): Promise<AiModelsResult> {
 	return apiGet<AiModelsResult>('/api/ai/models');
+}
+
+// --- body-fat profile ------------------------------------------------------
+
+/** Save the body-fat profile (either field; `''` clears it). */
+export async function setBodyProfile(profile: {
+	sex?: BodySex | '';
+	birthDate?: string;
+}): Promise<void> {
+	const result = await apiPut<SettingsResponse>('/api/settings', {
+		sex: profile.sex,
+		birth_date: profile.birthDate
+	});
+	settings.update((s) => ({ ...s, sex: result.sex ?? '', birthDate: result.birth_date ?? '' }));
 }
 
 // --- priority-notify digest ------------------------------------------------

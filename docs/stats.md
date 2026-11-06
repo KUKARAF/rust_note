@@ -54,6 +54,37 @@ registry entry is kept in the file but not charted.
 - `agg` — how a day's multiple samples reduce to one number: `sum` | `last` |
   `max` | `min` | `count`.
 
+## Body fat
+
+The **Body fat** tab (`/bodyfat`) is a single form: enter the skinfold readings
+(mm) and it computes body-fat % with the **Jackson-Pollock 3-site** equation
+(body density from the sum of three skinfolds and age, then Siri:
+`BF% = 495 / density − 450`). Sites depend on sex — men: chest, abdomen, thigh;
+women: triceps, suprailiac, thigh. Saving appends to the daily note (the date in
+the form, default today). Values are integer **tenths** because the format is
+integer-only:
+
+```yaml
+skinfold.chest: 150     # 15.0 mm
+skinfold.abdomen: 250
+skinfold.thigh: 200
+bodyfat: 179            # 17.9 %
+```
+
+`bodyfat` is registered with `agg: last`; `/stats` shows the latest value and a
+monthly chart (last reading of each month). The `skinfold.*` keys are stored but
+not charted.
+
+Sex and birth date (used to pick the chart row/table and derive age at each
+reading) are stored in your settings note frontmatter, not per device:
+
+| Key | Values |
+|-----|--------|
+| `sex` | `male` \| `female` (empty = unset) |
+| `birth_date` | `YYYY-MM-DD`, not in the future (empty = unset) |
+
+Both are readable/writable via `GET`/`PUT /api/settings` (`sex`, `birth_date`).
+
 ## Legacy format
 
 An older block-list form is still **read** so existing data keeps charting; it is

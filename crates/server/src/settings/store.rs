@@ -48,6 +48,13 @@ pub struct UserSettings {
     /// Internal bookkeeping: RFC3339 timestamp of the last fire, stamped by
     /// the scheduler. Not user-editable and never returned to the client.
     pub notify_last_sent: String,
+
+    // ---- body-fat profile (see `docs/stats.md`, "Body fat") ----
+    /// `male` / `female`, or empty when not set. Picks the men/women chart.
+    pub sex: String,
+    /// Birth date as `YYYY-MM-DD`, or empty when not set. Age at each reading
+    /// is derived from it.
+    pub birth_date: String,
 }
 
 impl Default for UserSettings {
@@ -65,6 +72,8 @@ impl Default for UserSettings {
             notify_scope: DEFAULT_NOTIFY_SCOPE.to_string(),
             notify_schedule: DEFAULT_NOTIFY_SCHEDULE.to_string(),
             notify_last_sent: String::new(),
+            sex: String::new(),
+            birth_date: String::new(),
         }
     }
 }
@@ -84,6 +93,29 @@ pub const DEFAULT_NOTIFY_SCHEDULE: &str = "FREQ=DAILY;BYHOUR=8;BYMINUTE=0";
 pub const NOTIFY_PRIORITIES: &[&str] = &["low", "medium", "high", "critical"];
 /// Accepted `notify_scope` values.
 pub const NOTIFY_SCOPES: &[&str] = &["ours", "theirs", "both"];
+
+/// Accepted non-empty `sex` values (selects the body-fat chart).
+pub const SEXES: &[&str] = &["male", "female"];
+
+/// Whether `s` is a valid `sex` setting: `male`, `female`, or empty (unset).
+pub fn is_valid_sex(s: &str) -> bool {
+    s.is_empty() || SEXES.contains(&s)
+}
+
+/// Whether `s` is a valid `birth_date` setting: empty (unset) or a real,
+/// non-future calendar date written `YYYY-MM-DD`.
+pub fn is_valid_birth_date(s: &str) -> bool {
+    if s.is_empty() {
+        return true;
+    }
+    if s.len() != 10 {
+        return false;
+    }
+    match chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        Ok(d) => d <= chrono::Utc::now().date_naive() && d.format("%Y-%m-%d").to_string() == s,
+        Err(_) => false,
+    }
+}
 
 /// Whether `s` is a valid `notify_priority`.
 pub fn is_valid_notify_priority(s: &str) -> bool {
@@ -324,6 +356,18 @@ pub fn parse_settings_tolerant(content: &str) -> UserSettings {
         .unwrap_or(DEFAULT_NOTIFY_SCHEDULE)
         .to_string();
     let notify_last_sent = fm.get("notify_last_sent").unwrap_or("").to_string();
+    let sex = fm
+        .get("sex")
+        .map(str::trim)
+        .filter(|s| is_valid_sex(s))
+        .unwrap_or("")
+        .to_string();
+    let birth_date = fm
+        .get("birth_date")
+        .map(str::trim)
+        .filter(|s| is_valid_birth_date(s))
+        .unwrap_or("")
+        .to_string();
 
     UserSettings {
         theme,
@@ -338,6 +382,8 @@ pub fn parse_settings_tolerant(content: &str) -> UserSettings {
         notify_scope,
         notify_schedule,
         notify_last_sent,
+        sex,
+        birth_date,
     }
 }
 
@@ -445,6 +491,33 @@ pub async fn load_or_bootstrap(state: &AppState, user_id: &str) -> AppResult<Use
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_profile_validation() {
+        assert!(is_valid_sex("") && is_valid_sex("male") && is_valid_sex("female"));
+        assert!(!is_valid_sex("Male") && !is_valid_sex("other"));
+        assert!(is_valid_birth_date("") && is_valid_birth_date("1994-06-15"));
+        assert!(!is_valid_birth_date("1994-6-15"), "must be zero-padded");
+        assert!(!is_valid_birth_date("1994-02-30"), "must be a real date");
+        assert!(
+            !is_valid_birth_date("2999-01-01"),
+            "must not be in the future"
+        );
+        assert!(!is_valid_birth_date("garbage"));
+    }
+
+    #[test]
+    fn body_profile_parses_and_tolerates_bad_values() {
+        let s = parse_settings_tolerant("---\nsex: female\nbirth_date: 1994-06-15\n---\n");
+        assert_eq!(
+            (s.sex.as_str(), s.birth_date.as_str()),
+            ("female", "1994-06-15")
+        );
+        let bad = parse_settings_tolerant("---\nsex: x\nbirth_date: nope\n---\n");
+        assert_eq!((bad.sex.as_str(), bad.birth_date.as_str()), ("", ""));
+        let none = parse_settings_tolerant("---\ntheme: ration\n---\n");
+        assert!(none.sex.is_empty() && none.birth_date.is_empty());
+    }
     use crate::auth::oidc::OidcClient;
     use crate::config::Config;
     use crate::notes::repo::NotesRepo;

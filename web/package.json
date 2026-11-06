@@ -10,7 +10,7 @@
 		"prepare": "(svelte-kit sync || echo '') && node scripts/copy-excalidraw-assets.mjs",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-		"test:unit": "node --experimental-strip-types src/lib/notes/ttsChunk.test.ts",
+		"test:unit": "node --experimental-strip-types src/lib/notes/ttsChunk.test.ts && node --experimental-strip-types src/lib/stats/bodyfat.test.ts",
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write ."
 	},

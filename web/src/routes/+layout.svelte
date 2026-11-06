@@ -200,6 +200,7 @@
 			<a class="nav-link" href={resolve('/todo')}>Todos</a>
 			<a class="nav-link" href={resolve('/pipeline')}>Pipeline</a>
 			<a class="nav-link" href={resolve('/stats')}>Stats</a>
+			<a class="nav-link" href={resolve('/bodyfat')}>Body fat</a>
 
 			<div class="app-nav-spacer"></div>
 
