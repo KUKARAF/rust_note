@@ -6,7 +6,6 @@
 
 pub mod device_token;
 pub mod frontmatter;
-pub mod leads;
 pub mod note_id;
 pub mod share_token;
 pub mod stats;

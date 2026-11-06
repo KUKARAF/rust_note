@@ -14,7 +14,6 @@ use tower_http::timeout::TimeoutLayer;
 use crate::auth;
 use crate::collab;
 use crate::notes;
-use crate::pipeline;
 use crate::recurring;
 use crate::settings;
 use crate::share;
@@ -58,7 +57,6 @@ pub fn build(state: AppState) -> Router {
         .merge(notes::routes::router())
         .merge(todos::routes::router())
         .merge(todos::query::router())
-        .merge(pipeline::routes::router())
         .merge(settings::routes::router())
         .merge(stats::routes::router())
         .merge(recurring::routes::router())

@@ -7,8 +7,6 @@ mod db_users;
 mod error;
 mod mcp;
 mod notes;
-mod notify;
-mod pipeline;
 mod recurring;
 mod routes;
 mod settings;
@@ -190,11 +188,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Kept for the graceful-shutdown flush of live collab rooms below.
     let shutdown_state = state.clone();
-
-    // Background: the pipeline-overdue → priority-notify digest scheduler.
-    // Detached; it ticks every 60s for the process lifetime, logging per-user
-    // errors rather than crashing. Safe to run in dev.
-    notify::spawn_scheduler(state.clone());
 
     let app = routes::build(state).layer(session_layer).layer(cors);
 

@@ -1,29 +1,24 @@
 //! Per-user settings REST routes (`GET`/`PUT /api/settings`).
 
 use axum::extract::State;
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::extract::WithRejection;
 use serde::{Deserialize, Serialize};
 
 use super::store::{
-    self, is_valid_birth_date, is_valid_model_id, is_valid_notify_priority, is_valid_notify_scope,
-    is_valid_sex, UserSettings, KNOWN_THEMES,
+    self, is_valid_birth_date, is_valid_endpoint, is_valid_model_id, is_valid_sex, UserSettings,
+    KNOWN_THEMES,
 };
 use crate::auth::session::RequireAuth;
 use crate::error::{AppError, AppResult};
 use crate::notes::{acl, fs_store::note_id_to_path};
-use crate::notify;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/ai/models", get(get_ai_models))
-        .route(
-            "/api/settings/notify-test",
-            post(notify::routes::notify_test),
-        )
 }
 
 #[derive(Debug, Serialize)]
@@ -37,16 +32,6 @@ struct SettingsResponse {
     has_openrouter_key: bool,
     /// Base URL of the OpenAI-compatible AI endpoint (non-secret).
     ai_endpoint: String,
-
-    // ---- priority-notify digest ----
-    notify_enabled: bool,
-    notify_endpoint: String,
-    notify_priority: String,
-    notify_scope: String,
-    notify_schedule: String,
-    /// Whether a priority-notify token is stored. The token itself is NEVER
-    /// returned (mirrors `has_openrouter_key`).
-    has_notify_token: bool,
 
     // ---- body-fat profile ----
     /// `male` / `female`, or `""` when unset.
@@ -63,12 +48,6 @@ impl SettingsResponse {
             ai_command_model: s.ai_command_model.clone(),
             has_openrouter_key: !s.openrouter_api_key.is_empty(),
             ai_endpoint: s.ai_endpoint.clone(),
-            notify_enabled: s.notify_enabled,
-            notify_endpoint: s.notify_endpoint.clone(),
-            notify_priority: s.notify_priority.clone(),
-            notify_scope: s.notify_scope.clone(),
-            notify_schedule: s.notify_schedule.clone(),
-            has_notify_token: !s.notify_token.is_empty(),
             sex: s.sex.clone(),
             birth_date: s.birth_date.clone(),
         }
@@ -88,16 +67,6 @@ struct PutSettingsRequest {
     /// Base URL of the OpenAI-compatible AI endpoint; validated as an http(s)
     /// URL (non-secret).
     ai_endpoint: Option<String>,
-
-    // ---- priority-notify digest ----
-    notify_enabled: Option<bool>,
-    notify_endpoint: Option<String>,
-    notify_priority: Option<String>,
-    notify_scope: Option<String>,
-    notify_schedule: Option<String>,
-    /// Write-only secret (like `openrouter_api_key`): accepted on PUT, never
-    /// echoed back.
-    notify_token: Option<String>,
 
     // ---- body-fat profile ----
     /// `male` / `female`, or `""` to clear.
@@ -141,34 +110,6 @@ async fn put_settings(
             ));
         }
     }
-    if let Some(priority) = &body.notify_priority {
-        if !is_valid_notify_priority(priority) {
-            return Err(AppError::BadRequest(
-                "notify_priority must be low/medium/high/critical".to_string(),
-            ));
-        }
-    }
-    if let Some(scope) = &body.notify_scope {
-        if !is_valid_notify_scope(scope) {
-            return Err(AppError::BadRequest(
-                "notify_scope must be ours/theirs/both".to_string(),
-            ));
-        }
-    }
-    if let Some(schedule) = &body.notify_schedule {
-        if !notify::is_valid_rrule(schedule) {
-            return Err(AppError::BadRequest(
-                "notify_schedule must be a valid RRULE".to_string(),
-            ));
-        }
-    }
-    if let Some(endpoint) = &body.notify_endpoint {
-        if !notify::is_valid_endpoint(endpoint) {
-            return Err(AppError::BadRequest(
-                "notify_endpoint must be an http(s) URL".to_string(),
-            ));
-        }
-    }
     if let Some(sex) = &body.sex {
         if !is_valid_sex(sex) {
             return Err(AppError::BadRequest(
@@ -184,7 +125,7 @@ async fn put_settings(
         }
     }
     if let Some(endpoint) = &body.ai_endpoint {
-        if !notify::is_valid_endpoint(endpoint) {
+        if !is_valid_endpoint(endpoint) {
             return Err(AppError::BadRequest(
                 "ai_endpoint must be an http(s) URL".to_string(),
             ));
@@ -223,25 +164,6 @@ async fn put_settings(
     }
     if let Some(endpoint) = &body.ai_endpoint {
         fm.set("ai_endpoint", endpoint);
-    }
-    if let Some(enabled) = &body.notify_enabled {
-        fm.set("notify_enabled", if *enabled { "true" } else { "false" });
-    }
-    if let Some(endpoint) = &body.notify_endpoint {
-        fm.set("notify_endpoint", endpoint);
-    }
-    if let Some(priority) = &body.notify_priority {
-        fm.set("notify_priority", priority);
-    }
-    if let Some(scope) = &body.notify_scope {
-        fm.set("notify_scope", scope);
-    }
-    if let Some(schedule) = &body.notify_schedule {
-        fm.set("notify_schedule", schedule);
-    }
-    // Write-only secret (even empty, to clear it); omitted leaves it as-is.
-    if let Some(token) = &body.notify_token {
-        fm.set("notify_token", token);
     }
     if let Some(sex) = &body.sex {
         fm.set("sex", sex);
@@ -559,77 +481,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notify_fields_round_trip_and_token_is_write_only() {
-        let (state, _notes_dir, _db_dir) = test_state().await;
-        let rel_path = note_id_to_path(&store::settings_note_id("alice"));
-
-        let resp = put_settings(
-            State(state.clone()),
-            RequireAuth("alice".to_string()),
-            WithRejection(
-                Json(PutSettingsRequest {
-                    notify_enabled: Some(true),
-                    notify_endpoint: Some("https://push.example.com".to_string()),
-                    notify_priority: Some("critical".to_string()),
-                    notify_scope: Some("ours".to_string()),
-                    notify_schedule: Some("FREQ=DAILY;BYHOUR=18;BYMINUTE=0".to_string()),
-                    notify_token: Some("ntfy-secret-xyz".to_string()),
-                    ..Default::default()
-                }),
-                std::marker::PhantomData,
-            ),
-        )
-        .await
-        .unwrap()
-        .0;
-
-        // Non-secret fields surface; `has_notify_token` is true; the token itself
-        // is never serialized.
-        assert!(resp.notify_enabled);
-        assert_eq!(resp.notify_endpoint, "https://push.example.com");
-        assert_eq!(resp.notify_priority, "critical");
-        assert_eq!(resp.notify_scope, "ours");
-        assert_eq!(resp.notify_schedule, "FREQ=DAILY;BYHOUR=18;BYMINUTE=0");
-        assert!(resp.has_notify_token);
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(
-            !json.contains("ntfy-secret-xyz"),
-            "raw notify token must never be serialized"
-        );
-        assert!(
-            !json.contains("\"notify_token\""),
-            "response must not carry a notify_token field (only has_notify_token)"
-        );
-        assert!(
-            !json.contains("notify_last_sent"),
-            "response must not expose notify_last_sent"
-        );
-
-        // The token IS persisted server-side.
-        let content = state.notes_repo.read_file(&rel_path).unwrap().unwrap();
-        let parsed = store::parse_settings_tolerant(&content);
-        assert_eq!(parsed.notify_token, "ntfy-secret-xyz");
-
-        // A later PUT omitting the token leaves it intact.
-        let resp2 = put_settings(
-            State(state.clone()),
-            RequireAuth("alice".to_string()),
-            WithRejection(
-                Json(PutSettingsRequest {
-                    notify_scope: Some("both".to_string()),
-                    ..Default::default()
-                }),
-                std::marker::PhantomData,
-            ),
-        )
-        .await
-        .unwrap()
-        .0;
-        assert!(resp2.has_notify_token, "omitted token must not be cleared");
-        assert_eq!(resp2.notify_scope, "both");
-    }
-
-    #[tokio::test]
     async fn ai_endpoint_round_trips_and_is_exposed() {
         let (state, _notes_dir, _db_dir) = test_state().await;
 
@@ -770,39 +621,6 @@ mod tests {
                 matches!(err, AppError::BadRequest(_)),
                 "{bad:?} must reject"
             );
-        }
-    }
-
-    #[tokio::test]
-    async fn put_rejects_invalid_notify_values() {
-        let (state, _notes_dir, _db_dir) = test_state().await;
-
-        for bad in [
-            PutSettingsRequest {
-                notify_priority: Some("urgent".to_string()),
-                ..Default::default()
-            },
-            PutSettingsRequest {
-                notify_scope: Some("all".to_string()),
-                ..Default::default()
-            },
-            PutSettingsRequest {
-                notify_schedule: Some("not-an-rrule".to_string()),
-                ..Default::default()
-            },
-            PutSettingsRequest {
-                notify_endpoint: Some("ftp://nope".to_string()),
-                ..Default::default()
-            },
-        ] {
-            let err = put_settings(
-                State(state.clone()),
-                RequireAuth("alice".to_string()),
-                WithRejection(Json(bad), std::marker::PhantomData),
-            )
-            .await
-            .unwrap_err();
-            assert!(matches!(err, AppError::BadRequest(_)));
         }
     }
 

@@ -18,7 +18,6 @@
 pub mod persist;
 pub mod protocol;
 pub mod room;
-pub mod stage_history;
 pub mod write;
 pub mod ws;
 
