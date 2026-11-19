@@ -132,7 +132,6 @@ pub(crate) async fn list_todos(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::oidc::OidcClient;
     use crate::config::Config;
     use crate::notes::fs_store::note_id_to_path;
     use crate::notes::repo::NotesRepo;
@@ -158,7 +157,7 @@ mod tests {
             db,
             notes_repo,
             config: Arc::new(Config::from_env()),
-            oidc: None::<Arc<OidcClient>>,
+            oidc: Default::default(),
             cookie_key: Key::generate(),
             note_locks: crate::state::NoteLocks::new(),
             rooms: crate::collab::room::RoomRegistry::new(),

@@ -18,7 +18,6 @@ mod tts;
 
 use std::sync::Arc;
 
-use auth::oidc::OidcClient;
 use axum::http::{HeaderValue, Method};
 use axum_extra::extract::cookie::Key;
 use config::Config;
@@ -109,25 +108,9 @@ async fn main() -> anyhow::Result<()> {
     // returning a clear 500 (`AppState.oidc == None`) instead of panicking.
     // This keeps `/health` (and anything else that doesn't need auth) up
     // even when the identity provider is down.
-    let oidc = if config.dev_mode {
-        tracing::info!("dev mode: skipping OIDC discovery entirely");
-        None
-    } else {
-        match OidcClient::discover(&config).await {
-            Ok(client) => {
-                tracing::info!("OIDC discovery succeeded");
-                Some(Arc::new(client))
-            }
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "OIDC discovery failed at startup; /auth/login and /auth/callback will return 500 \
-                     until this is fixed and the server is restarted"
-                );
-                None
-            }
-        }
-    };
+    // OIDC discovery happens lazily on the first login request (see
+    // `AppState::oidc_client`), so startup never depends on Authentik.
+    let oidc: crate::state::OidcSlot = Default::default();
 
     let session_store = SqliteStore::new(pool.clone());
     session_store.migrate().await?;

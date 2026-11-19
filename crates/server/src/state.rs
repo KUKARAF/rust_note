@@ -66,14 +66,17 @@ impl Default for NoteLocks {
 // `NotesRepo` is already cheaply `Clone` (it's an `Arc<Mutex<git2::Repository>>`
 // internally), so `AppState` itself just needs to be `Clone` for
 // `axum::extract::State` to work.
+/// Shared, late-filled OIDC client; see [`AppState::oidc`].
+pub type OidcSlot = Arc<tokio::sync::OnceCell<Arc<OidcClient>>>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
     pub notes_repo: NotesRepo,
     pub config: Arc<Config>,
-    /// `None` if OIDC discovery failed at startup (see `main.rs`) - OIDC
-    /// routes return a clear 500 rather than panicking in that case.
-    pub oidc: Option<Arc<OidcClient>>,
+    /// Lazily initialised on the first login/callback request (OIDC
+    /// discovery); a failed attempt is retried on the next request.
+    pub oidc: OidcSlot,
     /// Key used to sign/encrypt the short-lived OIDC login-flow cookie and
     /// (in a later phase) the share-link guest identity cookie.
     pub cookie_key: Key,
@@ -82,6 +85,16 @@ pub struct AppState {
     /// Live collaborative-editing rooms, keyed by note id. Cheap to clone
     /// (an `Arc<DashMap>` inside); see [`RoomRegistry`].
     pub rooms: RoomRegistry,
+}
+
+impl AppState {
+    /// Discover the OIDC provider on first use and cache the client.
+    pub async fn oidc_client(&self) -> anyhow::Result<Arc<OidcClient>> {
+        self.oidc
+            .get_or_try_init(|| async { Ok(Arc::new(OidcClient::discover(&self.config).await?)) })
+            .await
+            .cloned()
+    }
 }
 
 impl FromRef<AppState> for Key {

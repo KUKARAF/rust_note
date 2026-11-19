@@ -52,9 +52,8 @@ impl OidcClient {
     /// Perform OIDC discovery against `config.authentik_issuer_url` and
     /// build a configured `CoreClient`.
     ///
-    /// Discovery is retried a handful of times with backoff (Authentik may
-    /// simply not be up yet when this server starts, e.g. in a fresh
-    /// docker-compose stack) before giving up.
+    /// Called lazily on the first login request; a short retry covers
+    /// transient blips, and a failure is simply retried on the next request.
     pub async fn discover(config: &Config) -> anyhow::Result<Self> {
         let http_client = openidconnect::reqwest::ClientBuilder::new()
             // Following redirects on the *discovery* / token-exchange
@@ -64,7 +63,7 @@ impl OidcClient {
 
         let issuer_url = IssuerUrl::new(config.authentik_issuer_url.clone())?;
 
-        const MAX_ATTEMPTS: u32 = 3;
+        const MAX_ATTEMPTS: u32 = 2;
         let mut last_err = None;
         for attempt in 1..=MAX_ATTEMPTS {
             match CoreProviderMetadata::discover_async(issuer_url.clone(), &http_client).await {
@@ -188,11 +187,7 @@ async fn login(
     Query(params): Query<LoginParams>,
     jar: PrivateCookieJar,
 ) -> AppResult<impl axum::response::IntoResponse> {
-    let Some(oidc) = state.oidc.as_ref() else {
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "OIDC is not configured (discovery failed or has not completed yet)"
-        )));
-    };
+    let oidc = state.oidc_client().await.map_err(AppError::Internal)?;
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
@@ -251,11 +246,7 @@ async fn callback(
         )));
     }
 
-    let Some(oidc) = state.oidc.as_ref() else {
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "OIDC is not configured (discovery failed or has not completed yet)"
-        )));
-    };
+    let oidc = state.oidc_client().await.map_err(AppError::Internal)?;
 
     let code = params
         .code

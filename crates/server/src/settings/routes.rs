@@ -295,7 +295,6 @@ async fn get_ai_models(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::oidc::OidcClient;
     use crate::config::Config;
     use crate::notes::repo::NotesRepo;
     use axum_extra::extract::cookie::Key;
@@ -328,7 +327,7 @@ mod tests {
             db,
             notes_repo,
             config: Arc::new(Config::from_env()),
-            oidc: None::<Arc<OidcClient>>,
+            oidc: Default::default(),
             cookie_key: Key::generate(),
             note_locks: crate::state::NoteLocks::new(),
             rooms: crate::collab::room::RoomRegistry::new(),

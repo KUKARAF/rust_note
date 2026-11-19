@@ -31,7 +31,6 @@ pub mod test_support {
 
     use axum_extra::extract::cookie::Key;
 
-    use crate::auth::oidc::OidcClient;
     use crate::config::Config;
     use crate::notes::repo::NotesRepo;
     use crate::state::{AppState, NoteLocks};
@@ -62,7 +61,7 @@ pub mod test_support {
             db,
             notes_repo,
             config: Arc::new(Config::from_env()),
-            oidc: None::<Arc<OidcClient>>,
+            oidc: Default::default(),
             cookie_key: Key::generate(),
             note_locks: NoteLocks::new(),
             rooms: crate::collab::room::RoomRegistry::new(),
