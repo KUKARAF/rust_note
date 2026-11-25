@@ -126,6 +126,24 @@ export function parseSearch(query: string): QuerySpec {
 	return spec;
 }
 
+/**
+ * The task text the search bar would create from `query`, or null when there is
+ * nothing to create. The text is kept verbatim (`#tag`, `@location`, `p:N`,
+ * `due:…` are the task grammar already), minus the filter-only `p>=N`/`p<=N`.
+ * A query made of filter tokens alone (`fridge @home`) is not a task.
+ */
+export function newTaskText(query: string): string | null {
+	const tokens = query.split(/\s+/).filter((t) => t !== '' && !/^p[<>]=\d+$/.test(t));
+	const hasWords = tokens.some((t) => !/^[#@]./.test(t) && !burnerFromToken(t));
+	return hasWords ? tokens.join(' ') : null;
+}
+
+/** What to insert at the end of `doc` to append `task` as a new open checkbox. */
+export function taskAppendix(doc: string, task: string): string {
+	const sep = doc === '' || doc.endsWith('\n') ? '' : '\n';
+	return `${sep}- [ ] ${task}\n`;
+}
+
 /** Fixed display order of the burner groups. */
 export const BURNER_ORDER: Burner[] = ['frontburner', 'backburner', 'fridge', 'oven'];
 

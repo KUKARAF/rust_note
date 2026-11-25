@@ -17,6 +17,7 @@
 	import {
 		applyQuery,
 		parseSearch,
+		newTaskText,
 		ageInDays,
 		isSpoiling,
 		relativeDate,
@@ -28,7 +29,7 @@
 		type StatusFilter,
 		type GroupMode
 	} from '$lib/notes/todos';
-	import { setTodoDone, collabUserFrom } from '$lib/notes/todoToggle';
+	import { setTodoDone, addTodayTodo, collabUserFrom } from '$lib/notes/todoToggle';
 
 	const now = new Date();
 
@@ -37,13 +38,16 @@
 	let loadError = $state<string | null>(null);
 	let toggleError = $state<string | null>(null);
 
-	// The single search/command bar: free text plus literal tokens (@loc, #tag,
+	// The single search/command bar. It both filters and creates (Enter adds the
+	// typed text to today's note). Filtering takes free text plus literal tokens (@loc, #tag,
 	// burner names, p>=N / p<=N), parsed by `parseSearch`. The AI query writes
 	// its result back into this same bar as tokens, so there is one source of
 	// truth and the two paths can't fight.
 	let search = $state('');
 	let asking = $state(false);
 	let aiError = $state<string | null>(null);
+	let adding = $state(false);
+	let addError = $state<string | null>(null);
 
 	// Display popover — grouping, sort and completed-visibility live here, off the
 	// resting canvas. Default: group by burner, show open only (done hidden).
@@ -55,6 +59,7 @@
 
 	const effectiveSpec = $derived<QuerySpec>({ ...parseSearch(search), status, sort });
 	const result = $derived(applyQuery(todos, effectiveSpec, now, groupMode));
+	const draft = $derived(newTaskText(search));
 
 	/** True when anything is narrowing the view (so we offer a clear affordance). */
 	const filtered = $derived(search.trim() !== '' || status !== 'open' || sort != null);
@@ -96,6 +101,7 @@
 		status = 'open';
 		sort = undefined;
 		aiError = null;
+		addError = null;
 	}
 
 	async function loadTodos() {
@@ -147,6 +153,41 @@
 		}
 	}
 
+	async function addTodo() {
+		const task = draft;
+		if (task === null || adding) return;
+		const user = $auth.user;
+		if (!user) {
+			flagLoginRequired();
+			await goto(resolve('/login'));
+			return;
+		}
+		adding = true;
+		addError = null;
+		const typed = search;
+		try {
+			await addTodayTodo(task, collabUserFrom(user));
+			// Quiet refresh (no "Loading…" flash); keep anything typed meanwhile.
+			todos = await apiGet<Todo[]>('/api/todos');
+			if (search === typed) search = '';
+		} catch (err) {
+			if (err instanceof ApiError && err.status === 0) {
+				addError = "You're offline — adding a task needs a connection.";
+			} else {
+				addError = err instanceof Error ? err.message : 'Failed to add the task.';
+			}
+		} finally {
+			adding = false;
+		}
+	}
+
+	function onSearchKey(event: KeyboardEvent) {
+		if (event.key === 'Enter' && !event.isComposing) {
+			event.preventDefault();
+			void addTodo();
+		}
+	}
+
 	async function toggle(todo: Todo) {
 		const user = $auth.user;
 		if (!user) {
@@ -183,7 +224,12 @@
 		<!-- One search/command bar + a Display button. No persistent filter pills. -->
 		<div class="toolbar">
 			<div class="search">
-				<Input type="text" placeholder="Search or filter — try “fridge @home p>=2”…" bind:value={search}>
+				<Input
+					type="text"
+					placeholder="Search, or type a new task and press Enter…"
+					bind:value={search}
+					onkeydown={onSearchKey}
+				>
 					{#snippet prefix()}/{/snippet}
 				</Input>
 			</div>
@@ -214,6 +260,18 @@
 				onclick={() => (displayOpen = !displayOpen)}>⚙</button
 			>
 		</div>
+
+		{#if draft !== null}
+			<button type="button" class="add-row" onclick={addTodo} disabled={adding}>
+				<span class="add-plus">+</span>
+				<span class="add-text">{adding ? 'Adding…' : `Add “${draft}” to today`}</span>
+				<span class="add-key">↵</span>
+			</button>
+		{/if}
+
+		{#if addError}
+			<p class="status-line error">{addError}</p>
+		{/if}
 
 		{#if aiError}
 			<p class="status-line error">{aiError}</p>
@@ -342,6 +400,39 @@
 		flex: 1;
 		min-width: 0;
 	}
+	.add-row {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		width: 100%;
+		min-height: var(--tap-target);
+		padding: var(--space-2) var(--space-3);
+		margin-bottom: var(--space-3);
+		text-align: left;
+		font-family: var(--font-term);
+		font-size: var(--type-body);
+		color: var(--kv-ink);
+		background: transparent;
+		border: 1px dashed var(--border-accent);
+		border-radius: var(--radius-control);
+		cursor: pointer;
+	}
+	.add-row:disabled {
+		cursor: progress;
+		color: var(--kv-dim);
+	}
+	.add-plus {
+		color: var(--kv-accent);
+	}
+	.add-text {
+		flex: 1;
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+	.add-key {
+		color: var(--kv-faint);
+	}
+
 	.display-btn {
 		flex: none;
 		width: var(--tap-target);

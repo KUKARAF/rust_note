@@ -9,7 +9,8 @@
 import type { WebsocketProvider } from 'y-websocket';
 import { createCollabSession, deriveUserColor, type CollabUser } from '$lib/editor/collabProvider';
 import type { AuthUser } from '$lib/stores/auth';
-import type { Todo } from '$lib/notes/todos';
+import { taskAppendix, type Todo } from '$lib/notes/todos';
+import { ensureDailyNote, todayNoteId } from '$lib/notes/daily';
 
 /** Build the collab identity (caret label + color) from the auth user. */
 export function collabUserFrom(user: AuthUser): CollabUser {
@@ -123,6 +124,33 @@ export async function setTodoDone(todo: Todo, user: CollabUser, want: boolean): 
 
 		// Keep the socket open briefly so the update frame reaches the server;
 		// its own debounced task then commits to git even after we disconnect.
+		await delay(900);
+	} finally {
+		session.destroy();
+	}
+}
+
+/**
+ * Append `task` as a new open checkbox to today's daily note, creating the note
+ * first if needed. Throws on failure, including when the server doesn't sync.
+ */
+export async function addTodayTodo(task: string, user: CollabUser): Promise<void> {
+	const id = todayNoteId();
+	await ensureDailyNote(id);
+
+	const session = createCollabSession(id, user);
+	try {
+		await session.whenLocalLoaded;
+		await waitForSync(session.provider, 4000);
+		// Unlike a toggle, an append can't verify its target: writing into a doc
+		// that hasn't caught up could land above the note's frontmatter.
+		if (!session.provider.synced) {
+			throw new Error("Couldn't sync today's note — the task was not added.");
+		}
+
+		const text = session.ytext.toString();
+		session.ytext.insert(session.ytext.length, taskAppendix(text, task));
+
 		await delay(900);
 	} finally {
 		session.destroy();

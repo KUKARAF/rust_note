@@ -31,6 +31,16 @@ export function todayNoteId(): string {
 	return `diary/${y}-${m}-${d}`;
 }
 
+/** Create daily note `id` from the template unless it already exists. */
+export async function ensureDailyNote(id: string): Promise<void> {
+	try {
+		await apiPost('/api/notes', { id_or_title: id, content: DAILY_TEMPLATE });
+	} catch (err) {
+		// 409: it already exists (possibly created by another device/tab).
+		if (!(err instanceof ApiError && err.status === 409)) throw err;
+	}
+}
+
 /**
  * Open today's daily note, creating it (with the template) if it doesn't
  * exist yet. Returns null on success, or a human-readable error message the
@@ -47,13 +57,9 @@ export async function openTodayNote(): Promise<string | null> {
 	} catch (err) {
 		if (err instanceof ApiError && err.status === 404) {
 			try {
-				await apiPost('/api/notes', { id_or_title: id, content: DAILY_TEMPLATE });
+				await ensureDailyNote(id);
 			} catch (createErr) {
-				// 409: someone (another device/tab) created it between our GET
-				// and POST — that's fine, it exists now.
-				if (!(createErr instanceof ApiError && createErr.status === 409)) {
-					return createErr instanceof Error ? createErr.message : "Couldn't create today's note";
-				}
+				return createErr instanceof Error ? createErr.message : "Couldn't create today's note";
 			}
 			await goto(target);
 			return null;
