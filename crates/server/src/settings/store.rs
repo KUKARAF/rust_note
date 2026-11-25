@@ -145,9 +145,9 @@ pub fn resolve_ai_key(
         if let Some(k) = shared_key.filter(|k| !k.is_empty()) {
             return Ok(k.to_string());
         }
-        return Err("No AI API key configured — add one in Settings.".to_string());
+        return Err("To use AI features, add your LiteLLM API key in Settings.".to_string());
     }
-    Err("Set your own API key in Settings to use a custom AI endpoint.".to_string())
+    Err("To use a custom AI endpoint, add your API key for it in Settings.".to_string())
 }
 
 /// Reject an outbound AI request URL that targets a non-public address (SSRF
@@ -180,13 +180,28 @@ pub async fn guard_outbound_url(url: &str) -> Result<(), String> {
     for addr in addrs {
         resolved_any = true;
         if is_blocked_ip(addr.ip()) {
-            return Err("the AI endpoint resolves to a disallowed address".to_string());
+            return Err(format!(
+                "The app blocked the AI endpoint: {host} resolves to the private or local \
+                 address {}. This is not an API key problem.",
+                addr.ip()
+            ));
         }
     }
     if !resolved_any {
         return Err("the AI endpoint host did not resolve".to_string());
     }
     Ok(())
+}
+
+/// [`guard_outbound_url`] for a request to the AI `endpoint`, skipped for the
+/// built-in default: that address is fixed in code rather than chosen by a user,
+/// and on a self-hosted deployment it may resolve to a LAN address. Every other
+/// endpoint is checked. `url` must be built from `endpoint`.
+pub async fn guard_ai_url(endpoint: &str, url: &str) -> Result<(), String> {
+    if endpoint_is_default(endpoint) {
+        return Ok(());
+    }
+    guard_outbound_url(url).await
 }
 
 /// Whether `ip` is in a range outbound AI requests must never reach.
@@ -643,6 +658,26 @@ mod tests {
         // Non-http(s) scheme is refused before any resolution.
         assert!(guard_outbound_url("ftp://example.com/x").await.is_err());
         assert!(guard_outbound_url("not a url").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn guard_ai_url_exempts_only_the_default_endpoint() {
+        // The default passes without any address check (or DNS lookup).
+        let url = format!("{DEFAULT_AI_ENDPOINT}/chat/completions");
+        assert!(guard_ai_url(DEFAULT_AI_ENDPOINT, &url).await.is_ok());
+        // Any other endpoint is still checked, including same-host variants.
+        for endpoint in ["http://127.0.0.1:11434/v1", "http://192.168.1.66/v1"] {
+            let url = format!("{endpoint}/chat/completions");
+            assert!(guard_ai_url(endpoint, &url).await.is_err(), "{endpoint}");
+        }
+        for lookalike in [
+            "http://litellm.osmosis.page/v1",
+            "https://litellm.osmosis.page:8443/v1",
+            "https://litellm.osmosis.page/v1/other",
+            "https://litellm.osmosis.page@127.0.0.1/v1",
+        ] {
+            assert!(!endpoint_is_default(lookalike), "{lookalike}");
+        }
     }
 
     #[tokio::test]

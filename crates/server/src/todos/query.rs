@@ -170,7 +170,7 @@ async fn query_todos(
     let url = chat_url(&settings.ai_endpoint);
     // SSRF guard: refuse loopback/private/link-local/metadata targets before any
     // outbound request is issued.
-    store::guard_outbound_url(&url)
+    store::guard_ai_url(&settings.ai_endpoint, &url)
         .await
         .map_err(AppError::BadRequest)?;
     let spec = call_ai(&url, &settings.openrouter_model, &key, body.nl.trim()).await?;
@@ -241,7 +241,7 @@ async fn call_ai(url: &str, model: &str, key: &str, nl: &str) -> AppResult<Query
     if !status.is_success() {
         if status.as_u16() == 401 {
             return Err(AppError::BadRequest(
-                "The AI endpoint rejected the API key.".to_string(),
+                "The AI endpoint rejected your API key. Replace it in Settings.".to_string(),
             ));
         }
         return Err(AppError::Internal(anyhow!(

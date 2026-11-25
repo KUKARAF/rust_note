@@ -31,6 +31,7 @@
 	import { fetchAiModels } from '$lib/stores/settings';
 	import { chunkText, MAX_TOTAL_WORDS, MAX_WORDS_PER_CHUNK } from './ttsChunk';
 	import Card from '$lib/design/Card.svelte';
+	import AiError from '$lib/design/AiError.svelte';
 	import Button from '$lib/design/Button.svelte';
 
 	let {
@@ -436,7 +437,7 @@
 					<p class="rt-hint">loading models…</p>
 				{:else if loadState === 'no-key' || loadState === 'error'}
 					<p class="rt-error">
-						{loadError ?? 'Set an API key in Settings first.'}
+						<AiError message={loadError ?? "Couldn't load text-to-speech models."} />
 					</p>
 					<Button variant="outline" size="sm" onclick={loadModels}>Retry</Button>
 				{:else}
@@ -494,7 +495,10 @@
 					{/if}
 
 					{#if playError}
-						<p class="rt-error">{playError}</p>
+						<p class="rt-error"><AiError
+								message={playError ?? 'Playback failed.'}
+								settingsLink={playError !== 'There is no text to read.'}
+							/></p>
 					{/if}
 
 					{#if chunks.length > 0}

@@ -10,6 +10,7 @@
 	import { auth, flagLoginRequired } from '$lib/stores/auth';
 	import { encodeNotePath } from '$lib/notes/path';
 	import Card from '$lib/design/Card.svelte';
+	import AiError from '$lib/design/AiError.svelte';
 	import Button from '$lib/design/Button.svelte';
 	import Input from '$lib/design/Input.svelte';
 	import SectionTitle from '$lib/design/SectionTitle.svelte';
@@ -141,10 +142,10 @@
 			if (produced?.status) status = produced.status;
 			if (produced?.sort) sort = produced.sort;
 		} catch (err) {
-			if (err instanceof ApiError && err.status === 400) {
-				aiError = 'Add an OpenRouter API key in Settings to use natural-language queries.';
-			} else if (err instanceof ApiError && err.status === 0) {
+			if (err instanceof ApiError && err.status === 0) {
 				aiError = "You're offline — natural-language queries need a connection.";
+			} else if (err instanceof ApiError && err.status >= 500) {
+				aiError = 'The AI request failed. Check the endpoint and model.';
 			} else {
 				aiError = err instanceof Error ? err.message : 'Query failed';
 			}
@@ -274,7 +275,9 @@
 		{/if}
 
 		{#if aiError}
-			<p class="status-line error">{aiError}</p>
+			<p class="status-line error">
+				<AiError message={aiError} settingsLink={!aiError.startsWith("You're offline")} />
+			</p>
 		{/if}
 
 		{#if displayOpen}

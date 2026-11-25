@@ -360,7 +360,7 @@ async fn note_owner(state: &AppState, note_id: &str) -> Option<String> {
 /// Append a one-line failure notice to the note (loop-safe: the marker is
 /// already stripped before this is called).
 fn append_notice(room: &Arc<Room>, reason: &str) {
-    let suffix = format!("\n> ⚠️ #AI! couldn't run: {reason}\n");
+    let suffix = format!("\n> ⚠️ #AI! couldn't run: {reason} ([AI settings](/settings#ai))\n");
     crate::collab::write::apply_text_edit(room, |old| Some(format!("{old}{suffix}")));
 }
 

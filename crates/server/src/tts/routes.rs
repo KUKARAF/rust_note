@@ -87,7 +87,7 @@ async fn synthesize(
     // SSRF guard: refuse loopback/private/link-local/metadata targets before any
     // outbound request. `validate_tts_model` (below) and the speech POST share a
     // host, so one guard on the endpoint covers both.
-    store::guard_outbound_url(&speech_url(endpoint))
+    store::guard_ai_url(endpoint, &speech_url(endpoint))
         .await
         .map_err(AppError::BadRequest)?;
 
@@ -122,7 +122,7 @@ async fn synthesize(
     if !status.is_success() {
         if status.as_u16() == 401 {
             return Err(AppError::BadRequest(
-                "The AI endpoint rejected the API key.".to_string(),
+                "The AI endpoint rejected your API key. Replace it in Settings.".to_string(),
             ));
         }
         // Don't echo the upstream body — keep it short and key-free.

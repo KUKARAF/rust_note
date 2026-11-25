@@ -94,7 +94,7 @@ fn request_body(model: &str, body: &str, instruction: &str, stream: bool) -> ser
 /// Map a non-success HTTP status to a short, user-safe, secret-free reason.
 fn status_reason(status: reqwest::StatusCode) -> String {
     if status.as_u16() == 401 {
-        "the AI endpoint rejected the API key".to_string()
+        "the AI endpoint rejected your API key. Replace it in Settings".to_string()
     } else {
         format!("the AI endpoint returned {status}")
     }
@@ -113,7 +113,7 @@ pub async fn call_model(
     let url = chat_url(endpoint);
     // SSRF guard: refuse loopback/private/link-local/metadata targets before any
     // outbound request is issued.
-    crate::settings::store::guard_outbound_url(&url).await?;
+    crate::settings::store::guard_ai_url(endpoint, &url).await?;
     let request_body = request_body(model, body, instruction, false);
 
     // Harden the outbound client like the todo-query one: no redirects (SSRF)
@@ -173,7 +173,7 @@ pub async fn call_model_streaming(
     let url = chat_url(endpoint);
     // SSRF guard: refuse loopback/private/link-local/metadata targets before any
     // outbound request is issued.
-    crate::settings::store::guard_outbound_url(&url).await?;
+    crate::settings::store::guard_ai_url(endpoint, &url).await?;
     let request_body = request_body(model, body, instruction, true);
 
     // No whole-response `.timeout()` here: streaming is bounded by the caller's

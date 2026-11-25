@@ -256,7 +256,7 @@ async fn get_ai_models(
     } else if let Some(k) = &state.config.openrouter_api_key {
         k.clone()
     } else {
-        return AiModelsResponse::err("set an API key first");
+        return AiModelsResponse::err("To list models, add your LiteLLM API key in Settings.");
     };
 
     let url = format!(

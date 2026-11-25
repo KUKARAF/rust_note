@@ -295,7 +295,7 @@
 		{#if error}<p class="settings-error">{error}</p>{/if}
 	</section>
 
-	<section class="settings-section">
+	<section class="settings-section" id="ai">
 		<h2 class="settings-section-title">AI · LiteLLM</h2>
 		<p class="ai-help">
 			Powers the natural-language query on the <a href={resolve('/todo')}>Todos</a> board, via your LiteLLM
@@ -327,7 +327,7 @@
 					{/each}
 				</datalist>
 			{:else}
-				<p class="ai-current">{aiModelsError ?? 'Set an API key first.'}</p>
+				<p class="ai-current">{aiModelsError ?? 'To list models, add your LiteLLM API key below.'}</p>
 				<Input
 					placeholder="vendor/model"
 					bind:value={modelInput}
@@ -348,7 +348,7 @@
 					onchange={() => chooseCommandModel(commandModelInput)}
 				/>
 			{:else}
-				<p class="ai-current">{aiModelsError ?? 'Set an API key first.'}</p>
+				<p class="ai-current">{aiModelsError ?? 'To list models, add your LiteLLM API key below.'}</p>
 				<Input
 					placeholder="vendor/model"
 					bind:value={commandModelInput}
